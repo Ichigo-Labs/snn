@@ -1,0 +1,25 @@
+#ifndef SNN_INTERNAL_H
+#define SNN_INTERNAL_H
+
+#include "snn/snn.h"
+
+struct snn_network {
+    snn_size_t neuron_count;
+    snn_size_t synapse_count;
+    snn_architecture_t architecture;
+    snn_lif_params_t lif;
+    snn_size_t *row_ptr;
+    snn_size_t *col_idx;
+    float *weights;
+};
+
+struct snn_state {
+    snn_size_t neuron_count;
+    float *voltage;
+    float *current;
+    float *next_current;
+    uint32_t *refractory;
+    uint8_t *spikes;
+};
+
+#endif /* SNN_INTERNAL_H */
