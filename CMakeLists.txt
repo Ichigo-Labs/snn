@@ -47,7 +47,10 @@ if(SNN_ENABLE_CUDA)
         add_library(snn_cuda_obj OBJECT src/snn_cuda.cu)
         set_target_properties(snn_cuda_obj PROPERTIES CUDA_STANDARD 14 CUDA_STANDARD_REQUIRED ON CUDA_SEPARABLE_COMPILATION OFF)
         target_include_directories(snn_cuda_obj PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include ${CMAKE_CURRENT_SOURCE_DIR}/src)
-        target_compile_options(snn_cuda_obj PRIVATE $<$<COMPILE_LANGUAGE:CUDA>:--expt-relaxed-constexpr --compiler-options=-Wall,-Wextra>)
+        # --fmad=false keeps the integrate kernel's arithmetic bit-identical to
+        # the host build (which targets baseline x86-64 without FMA), so the
+        # CPU-vs-GPU parity tests can assert exact voltage equality.
+        target_compile_options(snn_cuda_obj PRIVATE $<$<COMPILE_LANGUAGE:CUDA>:--expt-relaxed-constexpr --fmad=false --compiler-options=-Wall,-Wextra>)
         if(SNN_ENABLE_COVERAGE)
             # Instrument the host-side code of the .cu translation unit so gcov
             # can measure the CUDA backend's control flow (kernels excluded).

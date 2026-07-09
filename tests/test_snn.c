@@ -106,7 +106,9 @@ static void test_memory_plans(void) {
     ASSERT_TRUE(plan.col_index_bytes == sizeof(snn_size_t));
     ASSERT_TRUE(plan.weight_bytes == sizeof(float));
     ASSERT_TRUE(plan.host_topology_bytes == plan.row_ptr_bytes + plan.col_index_bytes + plan.weight_bytes);
-    ASSERT_TRUE(plan.host_state_bytes == plan.device_state_bytes + 2u * sizeof(snn_size_t));
+    /* Host swaps the device-only external buffer (n floats) for the
+     * spike-index list (n snn_size_t). */
+    ASSERT_TRUE(plan.host_state_bytes == plan.device_state_bytes + 2u * sizeof(snn_size_t) - 2u * sizeof(float));
     ASSERT_TRUE(plan.host_total_bytes == plan.host_topology_bytes + plan.host_state_bytes);
     ASSERT_TRUE(plan.device_total_full_bytes > plan.device_topology_bytes);
     ASSERT_TRUE(plan.device_streaming_min_bytes < plan.device_total_full_bytes);
@@ -204,6 +206,19 @@ static void test_overflow_and_allocation_failures(void) {
 
     snn_test_set_alloc_fail_after(6); /* spike_indices, the last of the 7 state allocations */
     ASSERT_EQ_INT(snn_state_create(net, &state), SNN_ERR_OUT_OF_MEMORY);
+    snn_test_disable_alloc_failure();
+
+    /* The 8th allocation (OpenMP propagation scratch) exists only in OpenMP
+     * builds with >1 thread; elsewhere creation simply succeeds. */
+    snn_test_set_alloc_fail_after(7);
+    {
+        snn_status_t st = snn_state_create(net, &state);
+        ASSERT_TRUE(st == SNN_OK || st == SNN_ERR_OUT_OF_MEMORY);
+        if (st == SNN_OK) {
+            snn_state_free(state);
+            state = NULL;
+        }
+    }
     snn_test_disable_alloc_failure();
     snn_network_free(net);
     net = NULL;
@@ -498,6 +513,188 @@ static void test_run_cpu(void) {
     snn_network_free(net);
 }
 
+static int spikes_match(const uint8_t *a, const uint8_t *b, snn_size_t n) {
+    snn_size_t i = 0;
+    for (i = 0; i < n; ++i) {
+        if (a[i] != b[i]) {
+            return 0;
+        }
+    }
+    return 1;
+}
+
+/*
+ * The same driven network stepped with the state's full thread budget and
+ * with a state limited to one thread must spike identically: in OpenMP builds
+ * this differentially checks the parallel scatter (the workload crosses its
+ * engagement threshold) against the serial one; in serial builds it is a
+ * plain determinism check.
+ */
+static void test_propagation_thread_invariance(void) {
+    snn_lif_params_t p = snn_default_lif_params();
+    snn_random_pool_config_t rp = snn_default_random_pool_config(20000, 24);
+    snn_network_t *net = NULL;
+    snn_state_t *full = NULL;
+    snn_state_t *serial = NULL;
+    float *in = (float *)calloc(20000, sizeof(float));
+    uint8_t *fs = (uint8_t *)malloc(20000);
+    uint8_t *ss = (uint8_t *)malloc(20000);
+    int s = 0;
+    rp.seed = 777;
+    /* Dyadic weight (2^-4): every current sum is exactly representable, so
+     * spike trains are identical under ANY accumulation order and the exact
+     * equality asserted below is sound rather than probabilistic. */
+    rp.weight_min = 0.0625f;
+    rp.weight_max = 0.0625f;
+    ASSERT_TRUE(in != NULL && fs != NULL && ss != NULL);
+    ASSERT_EQ_INT(snn_build_random_pool(&rp, &p, &net), SNN_OK);
+    ASSERT_EQ_INT(snn_state_create(net, &full), SNN_OK);
+    ASSERT_EQ_INT(snn_state_create(net, &serial), SNN_OK);
+#ifdef SNN_ENABLE_TEST_HOOKS
+    snn_test_state_limit_threads(serial, 1u);
+    snn_test_state_limit_threads(NULL, 1u);   /* tolerated */
+    snn_test_state_limit_threads(serial, 0u); /* below 1: ignored */
+#endif
+    for (s = 0; s < 12; ++s) {
+        snn_size_t i = 0;
+        /* ~6.7k driven neurons x fanout 24 = ~160k edges per step. */
+        for (i = 0; i < 20000u; i += 3u) {
+            in[i] = ((i / 3u + (snn_size_t)s) % 2u == 0u) ? 1.4f : 0.0f;
+        }
+        ASSERT_EQ_INT(snn_step_cpu(net, full, in, fs), SNN_OK);
+        ASSERT_EQ_INT(snn_step_cpu(net, serial, in, ss), SNN_OK);
+        ASSERT_TRUE(spikes_match(fs, ss, 20000));
+    }
+    free(in);
+    free(fs);
+    free(ss);
+    snn_state_free(serial);
+    snn_state_free(full);
+    snn_network_free(net);
+}
+
+/* A NULL external buffer must be indistinguishable from an all-zeros one,
+ * down to the voltage bits (the integrate loop specializes on NULL input). */
+static void test_null_external_equals_zero_input(void) {
+    snn_network_t *net = NULL;
+    snn_state_t *a = NULL;
+    snn_state_t *b = NULL;
+    snn_size_t row[] = {0, 1, 2, 2};
+    snn_size_t col[] = {1, 2};
+    float w[] = {0.8f, 1.1f};
+    float drive[] = {1.2f, 0.4f, 0.0f};
+    float zeros[] = {0.0f, 0.0f, 0.0f};
+    float va[3] = {0};
+    float vb[3] = {0};
+    uint8_t sa[3] = {0};
+    uint8_t sb[3] = {0};
+    int s = 0;
+    ASSERT_EQ_INT(snn_build_custom_csr(3, 2, row, col, w, NULL, &net), SNN_OK);
+    ASSERT_EQ_INT(snn_state_create(net, &a), SNN_OK);
+    ASSERT_EQ_INT(snn_state_create(net, &b), SNN_OK);
+    ASSERT_EQ_INT(snn_step_cpu(net, a, drive, NULL), SNN_OK);
+    ASSERT_EQ_INT(snn_step_cpu(net, b, drive, NULL), SNN_OK);
+    for (s = 0; s < 4; ++s) {
+        ASSERT_EQ_INT(snn_step_cpu(net, a, NULL, sa), SNN_OK);
+        ASSERT_EQ_INT(snn_step_cpu(net, b, zeros, sb), SNN_OK);
+        ASSERT_TRUE(spikes_match(sa, sb, 3));
+        ASSERT_EQ_INT(snn_state_copy_voltage(a, va, 3), SNN_OK);
+        ASSERT_EQ_INT(snn_state_copy_voltage(b, vb, 3), SNN_OK);
+        ASSERT_TRUE(memcmp(va, vb, sizeof(va)) == 0);
+    }
+    snn_state_free(a);
+    snn_state_free(b);
+    snn_network_free(net);
+}
+
+static void test_refractory_edge_cases(void) {
+    snn_network_t *net = NULL;
+    snn_state_t *state = NULL;
+    snn_lif_params_t p = snn_default_lif_params();
+    snn_size_t row[] = {0, 0};
+    float drive[] = {2.0f};
+    uint8_t spikes[1] = {0};
+
+    /* refractory_steps == 0: a neuron may spike on consecutive steps. */
+    p.refractory_steps = 0;
+    ASSERT_EQ_INT(snn_build_custom_csr(1, 0, row, NULL, NULL, &p, &net), SNN_OK);
+    ASSERT_EQ_INT(snn_state_create(net, &state), SNN_OK);
+    ASSERT_EQ_INT(snn_step_cpu(net, state, drive, spikes), SNN_OK);
+    ASSERT_EQ_INT(spikes[0], 1);
+    ASSERT_EQ_INT(snn_step_cpu(net, state, drive, spikes), SNN_OK);
+    ASSERT_EQ_INT(spikes[0], 1);
+    snn_state_free(state);
+    snn_network_free(net);
+    net = NULL;
+    state = NULL;
+
+    /* refractory_steps == 2: two silent steps after a spike despite drive. */
+    p.refractory_steps = 2;
+    ASSERT_EQ_INT(snn_build_custom_csr(1, 0, row, NULL, NULL, &p, &net), SNN_OK);
+    ASSERT_EQ_INT(snn_state_create(net, &state), SNN_OK);
+    ASSERT_EQ_INT(snn_step_cpu(net, state, drive, spikes), SNN_OK);
+    ASSERT_EQ_INT(spikes[0], 1);
+    ASSERT_EQ_INT(snn_step_cpu(net, state, drive, spikes), SNN_OK);
+    ASSERT_EQ_INT(spikes[0], 0);
+    ASSERT_EQ_INT(snn_step_cpu(net, state, drive, spikes), SNN_OK);
+    ASSERT_EQ_INT(spikes[0], 0);
+    ASSERT_EQ_INT(snn_step_cpu(net, state, drive, spikes), SNN_OK);
+    ASSERT_EQ_INT(spikes[0], 1);
+    snn_state_free(state);
+    snn_network_free(net);
+}
+
+/* Injected events and a dense external buffer in the same step both drive
+ * the neuron. */
+static void test_inject_combined_with_dense(void) {
+    snn_network_t *net = NULL;
+    snn_state_t *state = NULL;
+    snn_size_t row[] = {0, 0};
+    snn_size_t idx[] = {0};
+    float val[] = {0.6f};
+    float drive[] = {0.6f};
+    uint8_t spikes[1] = {0};
+    ASSERT_EQ_INT(snn_build_custom_csr(1, 0, row, NULL, NULL, NULL, &net), SNN_OK);
+    ASSERT_EQ_INT(snn_state_create(net, &state), SNN_OK);
+    /* 0.6 alone is subthreshold... */
+    ASSERT_EQ_INT(snn_step_cpu(net, state, drive, spikes), SNN_OK);
+    ASSERT_EQ_INT(spikes[0], 0);
+    ASSERT_EQ_INT(snn_state_reset(net, state), SNN_OK);
+    /* ...but injected 0.6 plus dense 0.6 crosses the 1.0 threshold. */
+    ASSERT_EQ_INT(snn_state_inject_current(net, state, idx, val, 1), SNN_OK);
+    ASSERT_EQ_INT(snn_step_cpu(net, state, drive, spikes), SNN_OK);
+    ASSERT_EQ_INT(spikes[0], 1);
+    snn_state_free(state);
+    snn_network_free(net);
+}
+
+/* After snn_state_reset a run must replay identically: catches any state the
+ * reset misses (spike compaction, current/next_current swap parity, OpenMP
+ * scratch). */
+static void test_reset_replay(void) {
+    snn_network_t *net = NULL;
+    snn_state_t *state = NULL;
+    snn_size_t row[] = {0, 1, 2, 2};
+    snn_size_t col[] = {1, 2};
+    float w[] = {0.9f, 1.1f};
+    float inputs[18] = {1.2f, 0.0f, 0.0f,
+                        0.0f, 0.3f, 0.0f,
+                        0.9f, 0.9f, 0.0f,
+                        0.0f, 0.0f, 1.5f,
+                        1.2f, 1.2f, 1.2f,
+                        0.0f, 0.0f, 0.0f};
+    uint8_t first[18] = {0};
+    uint8_t second[18] = {0};
+    ASSERT_EQ_INT(snn_build_custom_csr(3, 2, row, col, w, NULL, &net), SNN_OK);
+    ASSERT_EQ_INT(snn_state_create(net, &state), SNN_OK);
+    ASSERT_EQ_INT(snn_run_cpu(net, state, inputs, 6, 3, first, 3), SNN_OK);
+    ASSERT_EQ_INT(snn_state_reset(net, state), SNN_OK);
+    ASSERT_EQ_INT(snn_run_cpu(net, state, inputs, 6, 3, second, 3), SNN_OK);
+    ASSERT_TRUE(memcmp(first, second, sizeof(first)) == 0);
+    snn_state_free(state);
+    snn_network_free(net);
+}
+
 static void test_inject_current(void) {
     snn_network_t *net = NULL;
     snn_state_t *state = NULL;
@@ -558,27 +755,24 @@ static void test_inject_current(void) {
     snn_network_free(net);
 }
 
-static int spikes_match(const uint8_t *a, const uint8_t *b, snn_size_t n) {
-    snn_size_t i = 0;
-    for (i = 0; i < n; ++i) {
-        if (a[i] != b[i]) {
-            return 0;
-        }
-    }
-    return 1;
-}
-
-/* Run a network on CPU and on a given CUDA config; assert per-step spike parity. */
+/*
+ * Run a network on CPU and on a given CUDA config; assert per-step spike
+ * parity and, at the end, bitwise membrane-voltage parity. The voltage check
+ * requires the caller to use dyadic weights (order-exact current sums) and
+ * relies on the CUDA backend compiling with --fmad=false.
+ */
 static void cuda_parity_run(snn_network_t *net, snn_cuda_config_t cfg,
                             snn_cuda_mode_t expect_mode, int steps, unsigned seed) {
     snn_size_t n = snn_network_neuron_count(net);
     snn_state_t *cpu = NULL;
     snn_cuda_context_t *ctx = NULL;
     float *in = (float *)malloc((size_t)n * sizeof(float));
+    float *cv = (float *)malloc((size_t)n * sizeof(float));
+    float *gv = (float *)malloc((size_t)n * sizeof(float));
     uint8_t *cs = (uint8_t *)malloc((size_t)n);
     uint8_t *gs = (uint8_t *)malloc((size_t)n);
     int s = 0;
-    ASSERT_TRUE(in != NULL && cs != NULL && gs != NULL);
+    ASSERT_TRUE(in != NULL && cv != NULL && gv != NULL && cs != NULL && gs != NULL);
     ASSERT_EQ_INT(snn_state_create(net, &cpu), SNN_OK);
     ASSERT_EQ_INT(snn_cuda_create(net, &cfg, &ctx), SNN_OK);
     ASSERT_EQ_INT(snn_cuda_context_mode(ctx), expect_mode);
@@ -592,9 +786,14 @@ static void cuda_parity_run(snn_network_t *net, snn_cuda_config_t cfg,
         ASSERT_EQ_INT(snn_cuda_step(ctx, in, gs), SNN_OK);
         ASSERT_TRUE(spikes_match(cs, gs, n));
     }
+    ASSERT_EQ_INT(snn_state_copy_voltage(cpu, cv, n), SNN_OK);
+    ASSERT_EQ_INT(snn_cuda_download_voltage(ctx, gv, n), SNN_OK);
+    ASSERT_TRUE(memcmp(cv, gv, (size_t)n * sizeof(float)) == 0);
     snn_cuda_free(ctx);
     snn_state_free(cpu);
     free(in);
+    free(cv);
+    free(gv);
     free(cs);
     free(gs);
 }
@@ -705,8 +904,9 @@ static void test_cuda_api(void) {
         uint8_t *gs = (uint8_t *)malloc(5000);
         int s = 0;
         rp.seed = 99;
-        rp.weight_min = 0.05f;
-        rp.weight_max = 0.10f;
+        /* Dyadic weight: sums are order-exact, see test_propagation_thread_invariance. */
+        rp.weight_min = 0.0625f;
+        rp.weight_max = 0.0625f;
         ASSERT_TRUE(idx != NULL && val != NULL && cs != NULL && gs != NULL);
         ASSERT_EQ_INT(snn_build_random_pool(&rp, &p, &inet), SNN_OK);
         ASSERT_EQ_INT(snn_state_create(inet, &icpu), SNN_OK);
@@ -714,8 +914,10 @@ static void test_cuda_api(void) {
         for (s = 0; s < 8; ++s) {
             snn_size_t count = 0;
             snn_size_t i2 = 0;
-            /* Varying event counts: the device staging grows, then is reused. */
-            for (i2 = (snn_size_t)s; i2 < 5000u; i2 += 7u + (snn_size_t)(s % 3)) {
+            /* Decreasing stride: batches grow across the first three steps
+             * (regrowing live staging buffers), then the sizes repeat and the
+             * staging is reused. */
+            for (i2 = (snn_size_t)s; i2 < 5000u; i2 += 7u - (snn_size_t)(s % 3)) {
                 idx[count] = i2;
                 val[count] = 1.5f;
                 ++count;
@@ -733,6 +935,33 @@ static void test_cuda_api(void) {
         idx[0] = 5000;
         ASSERT_EQ_INT(snn_cuda_inject_current(ctx, idx, val, 1), SNN_ERR_INVALID_ARGUMENT);
         idx[0] = 0;
+        /* An absurd count is rejected before it can wrap the staging size. */
+        ASSERT_EQ_INT(snn_cuda_inject_current(ctx, idx, val, UINT64_MAX / 4u), SNN_ERR_INVALID_ARGUMENT);
+        /* Injection is mode-agnostic: repeat a few steps on a STREAMING context. */
+        {
+            snn_cuda_config_t sc = snn_cuda_default_config();
+            snn_cuda_context_t *sctx = NULL;
+            sc.prefer_streaming = 1;
+            sc.max_stream_rows = 256;
+            ASSERT_EQ_INT(snn_state_reset(inet, icpu), SNN_OK);
+            ASSERT_EQ_INT(snn_cuda_create(inet, &sc, &sctx), SNN_OK);
+            ASSERT_EQ_INT(snn_cuda_context_mode(sctx), SNN_CUDA_MODE_STREAMING);
+            for (s = 0; s < 4; ++s) {
+                snn_size_t count = 0;
+                snn_size_t i2 = 0;
+                for (i2 = (snn_size_t)s; i2 < 5000u; i2 += 6u) {
+                    idx[count] = i2;
+                    val[count] = 1.5f;
+                    ++count;
+                }
+                ASSERT_EQ_INT(snn_state_inject_current(inet, icpu, idx, val, count), SNN_OK);
+                ASSERT_EQ_INT(snn_cuda_inject_current(sctx, idx, val, count), SNN_OK);
+                ASSERT_EQ_INT(snn_step_cpu(inet, icpu, NULL, cs), SNN_OK);
+                ASSERT_EQ_INT(snn_cuda_step(sctx, NULL, gs), SNN_OK);
+                ASSERT_TRUE(spikes_match(cs, gs, 5000));
+            }
+            snn_cuda_free(sctx);
+        }
 #ifdef SNN_ENABLE_TEST_HOOKS
         /* Fault injection through every inject seam on a fresh context:
          * grow-path cudaMallocs (#0 indices, #1 values), the indices upload
@@ -777,14 +1006,19 @@ static void test_cuda_api(void) {
         snn_cuda_config_t sc;
         p.refractory_steps = 2;
         rp.seed = 4242;
-        rp.weight_min = 0.03f;
-        rp.weight_max = 0.06f;
+        /* Dyadic weight (3 * 2^-6): current sums are exact under any
+         * accumulation order, so the GPU's atomic scatter and the CPU's
+         * row-order fold agree bitwise, not just probabilistically. */
+        rp.weight_min = 0.046875f;
+        rp.weight_max = 0.046875f;
         ASSERT_EQ_INT(snn_build_random_pool(&rp, &p, &pool), SNN_OK);
         cuda_parity_run(pool, snn_cuda_default_config(), SNN_CUDA_MODE_FULL, 12, 11);
         sc = snn_cuda_default_config();
         sc.prefer_streaming = 1;
         sc.max_stream_rows = 512;
-        sc.max_stream_synapses = 30000; /* forces many chunks incl. exact-fill break */
+        /* 512 rows x uniform degree 48 = exactly 24576: every full chunk ends
+         * on the edge_count == max_stream_synapses exact-fill break. */
+        sc.max_stream_synapses = 24576;
         cuda_parity_run(pool, sc, SNN_CUDA_MODE_STREAMING, 12, 11);
         /* Auto-sized streaming chunk (max_stream_synapses == 0 path). */
         sc = snn_cuda_default_config();
@@ -797,19 +1031,32 @@ static void test_cuda_api(void) {
         sc.max_vram_bytes = (uint64_t)2u << 20;
         cuda_parity_run(pool, sc, SNN_CUDA_MODE_STREAMING, 4, 11);
         /*
-         * Budget just above the resident-state size: the auto-sized synapse
-         * chunk computes below max_degree and must clamp up to max_degree so the
-         * densest row still fits. 20000 neurons * 21 B ~= 420 KB of state.
+         * Budget barely above the resident-state size (20000 neurons * 21 B =
+         * 420000 B, budget leaves 1000 B): the auto-sized row window clamps to
+         * the leftover budget, and the auto-sized synapse chunk computes below
+         * max_degree and must clamp up to it so the densest row still fits.
          */
         sc = snn_cuda_default_config();
         sc.prefer_streaming = 1;
-        sc.max_vram_bytes = (uint64_t)440u * 1024u;
+        sc.max_vram_bytes = (uint64_t)421u * 1000u;
         cuda_parity_run(pool, sc, SNN_CUDA_MODE_STREAMING, 3, 11);
         /* max_stream_rows clamp above 65536 (still valid, just clamped). */
         sc = snn_cuda_default_config();
         sc.prefer_streaming = 1;
         sc.max_stream_rows = 200000;
         cuda_parity_run(pool, sc, SNN_CUDA_MODE_STREAMING, 3, 11);
+        /*
+         * Nonzero rest/reset and a fractional input scale (all dyadic) move
+         * the arithmetic away from the all-zeros corner where an FMA-
+         * contraction mismatch between the backends would be invisible.
+         */
+        p = snn_default_lif_params();
+        p.v_rest = 0.25f;
+        p.v_reset = -0.5f;
+        p.input_scale = 0.5f;
+        p.refractory_steps = 1;
+        ASSERT_EQ_INT(snn_network_set_lif_params(pool, &p), SNN_OK);
+        cuda_parity_run(pool, snn_cuda_default_config(), SNN_CUDA_MODE_FULL, 8, 21);
         snn_network_free(pool);
     }
 
@@ -822,7 +1069,7 @@ static void test_cuda_api(void) {
         snn_cuda_config_t sc;
         p.refractory_steps = 1;
         ff.fanout_per_neuron = 32;
-        ff.weight = 0.09f;
+        ff.weight = 0.09375f; /* dyadic (3 * 2^-5): order-exact sums */
         ff.seed = 5;
         ASSERT_EQ_INT(snn_build_feedforward(&ff, &p, &ffnet), SNN_OK);
         cuda_parity_run(ffnet, snn_cuda_default_config(), SNN_CUDA_MODE_FULL, 15, 2);
@@ -986,6 +1233,11 @@ int main(void) {
     test_random_pool_builder();
     test_cpu_state_and_steps();
     test_run_cpu();
+    test_propagation_thread_invariance();
+    test_null_external_equals_zero_input();
+    test_refractory_edge_cases();
+    test_inject_combined_with_dense();
+    test_reset_replay();
     test_inject_current();
     test_cuda_api();
     printf("all tests passed\n");

@@ -75,15 +75,16 @@ static int bytes_for_array_u64(uint64_t count, uint64_t elem_size, uint64_t *out
     return checked_mul_u64(count, elem_size, out);
 }
 
+/* The SIZE_MAX guards make u64 sizes fail cleanly (as OOM) on ILP32 hosts
+ * instead of truncating; they constant-fold away on LP64 targets. */
 static void *calloc_u64(uint64_t count, uint64_t elem_size) {
-    size_t c = (size_t)count;
-    size_t e = (size_t)elem_size;
-    return snn_calloc_impl(c, e);
+    return count > (uint64_t)SIZE_MAX || elem_size > (uint64_t)SIZE_MAX
+               ? NULL
+               : snn_calloc_impl((size_t)count, (size_t)elem_size);
 }
 
 static void *malloc_bytes_u64(uint64_t bytes) {
-    size_t b = (size_t)bytes;
-    return snn_malloc_impl(b);
+    return bytes > (uint64_t)SIZE_MAX ? NULL : snn_malloc_impl((size_t)bytes);
 }
 
 static uint64_t splitmix64_next(uint64_t *state) {
@@ -239,6 +240,21 @@ int snn_test_exercise_internal_guards(void) {
 snn_status_t snn_test_prefix_layer_offsets(const snn_size_t *sizes, size_t count, snn_size_t *offsets) {
     return prefix_layer_offsets(sizes, count, offsets);
 }
+
+/* Shrinks the thread budget of a state's parallel propagation (never grows
+ * it: the scratch buffers are sized for the creation-time count). Lets tests
+ * differentially compare the parallel scatter against the serial one. A no-op
+ * in serial builds, where thread_count is always 0. */
+void snn_test_state_limit_threads(snn_state_t *state, snn_size_t thread_count) {
+#ifdef SNN_ENABLE_OPENMP
+    if (state != NULL && thread_count >= 1u && thread_count < state->thread_count) {
+        state->thread_count = thread_count;
+    }
+#else
+    (void)state;
+    (void)thread_count;
+#endif
+}
 #endif
 
 const char *snn_status_string(snn_status_t status) {
@@ -324,12 +340,12 @@ snn_status_t snn_estimate_memory_for_counts(snn_size_t neuron_count,
     uint64_t col = 0;
     uint64_t weights = 0;
     uint64_t topology = 0;
-    uint64_t state_floats = 0;
-    uint64_t state_float_bytes = 0;
+    uint64_t device_float_bytes = 0;
     uint64_t refractory_bytes = 0;
     uint64_t spike_bytes = 0;
     uint64_t spike_index_bytes = 0;
-    uint64_t state_bytes = 0;
+    uint64_t device_state = 0;
+    uint64_t host_state = 0;
     uint64_t streaming_min = 0;
     if (out_plan == NULL || neuron_count == 0) {
         return SNN_ERR_INVALID_ARGUMENT;
@@ -344,15 +360,21 @@ snn_status_t snn_estimate_memory_for_counts(snn_size_t neuron_count,
         !bytes_for_array_u64(synapse_count, sizeof(float), &weights) ||
         !checked_add_u64(row, col, &topology) ||
         !checked_add_u64(topology, weights, &topology) ||
-        !bytes_for_array_u64(neuron_count, 4u, &state_floats) ||
-        !bytes_for_array_u64(state_floats, sizeof(float), &state_float_bytes) ||
+        !bytes_for_array_u64(neuron_count, 4u * sizeof(float), &device_float_bytes) ||
         !bytes_for_array_u64(neuron_count, sizeof(uint32_t), &refractory_bytes) ||
         !bytes_for_array_u64(neuron_count, sizeof(uint8_t), &spike_bytes) ||
         !bytes_for_array_u64(neuron_count, sizeof(snn_size_t), &spike_index_bytes) ||
-        !checked_add_u64(state_float_bytes, refractory_bytes, &state_bytes) ||
-        !checked_add_u64(state_bytes, spike_bytes, &state_bytes) ||
-        !checked_add_u64(state_bytes, spike_index_bytes, &state_bytes) ||
-        !checked_add_u64(state_bytes, sizeof(snn_size_t) * 2u + sizeof(snn_size_t) + sizeof(float), &streaming_min)) {
+        !checked_add_u64(device_float_bytes, refractory_bytes, &device_state) ||
+        !checked_add_u64(device_state, spike_bytes, &device_state) ||
+        !checked_add_u64(device_state, sizeof(snn_size_t) * 2u + sizeof(snn_size_t) + sizeof(float), &streaming_min)) {
+        out_plan->overflowed = 1;
+        return SNN_ERR_OVERFLOW;
+    }
+    /* The host state holds three float arrays (voltage/current/next_current;
+     * the external-input buffer is device-only) plus the spike-index list. */
+    host_state = device_state - (uint64_t)neuron_count * sizeof(float);
+    if (!checked_add_u64(host_state, spike_index_bytes, &host_state) ||
+        !checked_add_u64(topology, host_state, &out_plan->host_total_bytes)) {
         out_plan->overflowed = 1;
         return SNN_ERR_OVERFLOW;
     }
@@ -360,15 +382,12 @@ snn_status_t snn_estimate_memory_for_counts(snn_size_t neuron_count,
     out_plan->col_index_bytes = col;
     out_plan->weight_bytes = weights;
     out_plan->host_topology_bytes = topology;
-    out_plan->host_state_bytes = state_bytes;
-    out_plan->device_state_bytes = state_bytes - spike_index_bytes;
-    if (!checked_add_u64(topology, state_bytes, &out_plan->host_total_bytes)) {
-        out_plan->overflowed = 1;
-        return SNN_ERR_OVERFLOW;
-    }
+    out_plan->host_state_bytes = host_state;
     out_plan->device_topology_bytes = topology;
-    out_plan->device_streaming_min_bytes = streaming_min - spike_index_bytes;
-    (void)checked_add_u64(topology, out_plan->device_state_bytes, &out_plan->device_total_full_bytes);
+    out_plan->device_state_bytes = device_state;
+    out_plan->device_streaming_min_bytes = streaming_min;
+    /* host_total (checked above) exceeds this sum, so it cannot overflow. */
+    (void)checked_add_u64(topology, device_state, &out_plan->device_total_full_bytes);
     return SNN_OK;
 }
 
@@ -592,7 +611,7 @@ snn_status_t snn_state_create(const snn_network_t *network, snn_state_t **out_st
         uint64_t partial_elems = 0;
         if (!checked_mul_u64(state->thread_count, network->neuron_count, &partial_elems)) {
             snn_state_free(state);
-            return SNN_ERR_OUT_OF_MEMORY;
+            return SNN_ERR_OVERFLOW;
         }
         state->thread_partials = (float *)calloc_u64(partial_elems, sizeof(float));
         if (state->thread_partials == NULL) {

@@ -56,6 +56,13 @@ typedef struct snn_random_pool_config {
     int allow_self_connections;
 } snn_random_pool_config_t;
 
+/*
+ * Dry-run byte sizing for a network plus one simulation state. Two additions
+ * are intentionally not included: OpenMP builds allocate an extra
+ * omp_get_max_threads() * neuron_count floats of propagation scratch per
+ * state, and CUDA event injection keeps device staging sized to the largest
+ * batch passed to snn_cuda_inject_current.
+ */
 typedef struct snn_memory_plan {
     snn_size_t neuron_count;
     snn_size_t synapse_count;
@@ -82,7 +89,10 @@ typedef enum snn_cuda_mode {
 } snn_cuda_mode_t;
 
 typedef struct snn_cuda_config {
-    uint64_t max_vram_bytes;      /* 0 means use all currently free VRAM reported by CUDA. */
+    /* 0 means use all currently free VRAM reported by CUDA. Best effort: the
+     * resident per-neuron state and a minimal topology chunk are always
+     * allocated, even when they alone exceed the cap. */
+    uint64_t max_vram_bytes;
     snn_size_t max_stream_synapses; /* 0 means auto-size the streamed synapse chunk. */
     snn_size_t max_stream_rows;     /* 0 means auto-size the streamed row chunk. */
     int prefer_streaming;
@@ -125,6 +135,8 @@ const snn_size_t *snn_network_row_ptr(const snn_network_t *network);
 const snn_size_t *snn_network_col_idx(const snn_network_t *network);
 const float *snn_network_weights(const snn_network_t *network);
 snn_lif_params_t snn_network_lif_params(const snn_network_t *network);
+/* Applies to subsequent CPU steps. CUDA contexts capture the parameters at
+ * snn_cuda_create time; recreate the context to apply changes on the GPU. */
 snn_status_t snn_network_set_lif_params(snn_network_t *network, const snn_lif_params_t *params);
 
 snn_status_t snn_state_create(const snn_network_t *network, snn_state_t **out_state);
@@ -160,6 +172,8 @@ snn_status_t snn_run_cpu(const snn_network_t *network,
 
 snn_cuda_config_t snn_cuda_default_config(void);
 int snn_cuda_available(void);
+/* The network must outlive the context: STREAMING mode reads its topology on
+ * every step (FULL mode copies it to the device at create time). */
 snn_status_t snn_cuda_create(const snn_network_t *network,
                              const snn_cuda_config_t *config,
                              snn_cuda_context_t **out_context);
@@ -172,6 +186,9 @@ snn_status_t snn_cuda_inject_current(snn_cuda_context_t *context,
                                      const snn_size_t *host_indices,
                                      const float *host_values,
                                      snn_size_t count);
+/* On any error other than SNN_ERR_INVALID_ARGUMENT the device state may be
+ * partially advanced and the context must be freed and recreated; if only the
+ * final spike download fails, the step itself has already been applied. */
 snn_status_t snn_cuda_step(snn_cuda_context_t *context,
                            const float *host_external_current,
                            uint8_t *host_out_spikes);

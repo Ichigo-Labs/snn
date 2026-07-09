@@ -126,10 +126,10 @@ static snn_status_t cuda_check_launch(void) {
 
 /*
  * Byte sizing for device buffers. All counts reaching these helpers are bounded
- * by snn_cuda_create()'s snn_network_memory_plan() validation (topology/state)
- * or by the streaming chunk clamps (rows <= 65536, synapses <= synapse_count),
- * so on an LP64 host the product always fits in size_t; no per-call overflow
- * re-check is needed here (it is validated once, at create time).
+ * by snn_cuda_create()'s snn_network_memory_plan() validation (topology/state),
+ * by the streaming chunk clamps (rows <= 65536, synapses <= synapse_count), or
+ * by snn_cuda_inject_current()'s explicit count guard, so on an LP64 host the
+ * product always fits in size_t; no per-call overflow re-check is needed here.
  */
 static size_t bytes_for_cuda(uint64_t count, uint64_t elem_size) {
     return (size_t)(count * elem_size);
@@ -345,6 +345,15 @@ static snn_status_t allocate_streaming_topology(snn_cuda_context_t *ctx, const s
     if (desired_rows > ctx->neuron_count) {
         desired_rows = ctx->neuron_count;
     }
+    if (config->max_stream_rows == 0u) {
+        /* Auto-sized rows respect the VRAM budget: give the row window at most
+         * half of what remains after the resident state, leaving the rest for
+         * the synapse chunk (a single-row window needs only 16 bytes). */
+        const uint64_t max_rows = available_for_chunks / 2u / sizeof(snn_size_t);
+        if ((uint64_t)desired_rows + 1u > max_rows) {
+            desired_rows = max_rows > 1u ? (snn_size_t)(max_rows - 1u) : 1u;
+        }
+    }
     row_bytes = (uint64_t)(desired_rows + 1u) * sizeof(snn_size_t);
 
     if (config->max_stream_synapses != 0u) {
@@ -500,6 +509,11 @@ snn_status_t snn_cuda_inject_current(snn_cuda_context_t *context,
     }
     if (count == 0u) {
         return SNN_OK;
+    }
+    /* Keep bytes_for_cuda()'s no-overflow invariant: this is the only entry
+     * point whose element count comes straight from the caller. */
+    if (count > UINT64_MAX / sizeof(snn_size_t)) {
+        return SNN_ERR_INVALID_ARGUMENT;
     }
     /* Validate on the host before any device work so a bad batch is a no-op. */
     for (k = 0; k < count; ++k) {
