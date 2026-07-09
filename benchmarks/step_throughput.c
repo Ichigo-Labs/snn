@@ -10,11 +10,19 @@
  * Workloads:
  *   - integrate-bound: 2M neurons, 0 synapses (isolates the membrane update)
  *   - propagation-bound: 200k-neuron random pool, fanout 64 (12.8M synapses,
- *     ~8% of neurons spiking per step)
+ *     ~30% of neurons spiking per step)
  *
- * A short instrumented probe reports the spike rate and synapse events per
- * step; the timed loop then runs the bare step (no spike readback on CPU,
- * spike download included on GPU) so numbers are comparable across changes.
+ * Variants per workload:
+ *   cpu     dense external input, no spike readback
+ *   cpu-ev  sparse injected events, no spike readback
+ *   gpu     dense input upload + spike download each step
+ *   gpu-nd  dense input upload, no spike download
+ *   gpu-ni  no host I/O at all (kernel cost)
+ *   gpu-ev  sparse injected events + spike download
+ *
+ * A short instrumented probe reports the workload's spike rate and synapse
+ * events per step; the timed loops then run the bare step so numbers are
+ * comparable across changes.
  */
 #include <snn/snn.h>
 
@@ -37,6 +45,13 @@ static uint64_t mix64(uint64_t z) {
     return z ^ (z >> 31);
 }
 
+static void report(const char *name, const char *variant, double ms_per_step,
+                   double spike_rate, double events_per_step) {
+    printf("%-26s %-7s %10.3f ms/step %10.1f steps/s  %5.2f%% spikes  %8.2f Mevents/s\n",
+           name, variant, ms_per_step, 1000.0 / ms_per_step, spike_rate * 100.0,
+           events_per_step / (ms_per_step * 1000.0));
+}
+
 /* FRAME_COUNT deterministic input frames driving ~drive_percent% of neurons. */
 static float *make_frames(snn_size_t n, unsigned drive_percent, float amplitude) {
     float *frames = (float *)calloc((size_t)n * FRAME_COUNT, sizeof(float));
@@ -57,27 +72,53 @@ static const float *frame_at(const float *frames, snn_size_t n, int step) {
     return frames + (size_t)((unsigned)step % FRAME_COUNT) * n;
 }
 
+/* The same frames as sparse (index, value) event lists. */
+static void make_event_frames(const float *frames, snn_size_t n,
+                              snn_size_t *idx[FRAME_COUNT], float *val[FRAME_COUNT],
+                              snn_size_t count[FRAME_COUNT]) {
+    for (unsigned f = 0; f < FRAME_COUNT; ++f) {
+        const float *frame = frames + (size_t)f * n;
+        snn_size_t c = 0;
+        for (snn_size_t i = 0; i < n; ++i) {
+            c += frame[i] != 0.0f;
+        }
+        idx[f] = (snn_size_t *)malloc((size_t)c * sizeof(snn_size_t));
+        val[f] = (float *)malloc((size_t)c * sizeof(float));
+        count[f] = c;
+        if (idx[f] == NULL || val[f] == NULL) {
+            fprintf(stderr, "event alloc failed\n");
+            exit(1);
+        }
+        c = 0;
+        for (snn_size_t i = 0; i < n; ++i) {
+            if (frame[i] != 0.0f) {
+                idx[f][c] = i;
+                val[f][c] = frame[i];
+                ++c;
+            }
+        }
+    }
+}
+
 /* Probe a few steps to report the workload's spike rate and synapse events. */
-static void probe_workload(const snn_network_t *net, snn_state_t *state,
-                           const float *frames, int probe_steps,
+static void probe_workload(const snn_network_t *net, const float *frames, int probe_steps,
                            double *out_spike_rate, double *out_events_per_step) {
     const snn_size_t n = snn_network_neuron_count(net);
     const snn_size_t *row_ptr = snn_network_row_ptr(net);
+    snn_state_t *state = NULL;
     uint8_t *spikes = (uint8_t *)malloc((size_t)n);
     uint64_t spike_total = 0;
     uint64_t event_total = 0;
-    int s = 0;
-    if (spikes == NULL) {
+    if (spikes == NULL || snn_state_create(net, &state) != SNN_OK) {
         fprintf(stderr, "probe alloc failed\n");
         exit(1);
     }
-    for (s = 0; s < probe_steps; ++s) {
-        snn_size_t i = 0;
+    for (int s = 0; s < probe_steps; ++s) {
         if (snn_step_cpu(net, state, frame_at(frames, n, s), spikes) != SNN_OK) {
             fprintf(stderr, "probe step failed\n");
             exit(1);
         }
-        for (i = 0; i < n; ++i) {
+        for (snn_size_t i = 0; i < n; ++i) {
             if (spikes[i] != 0u) {
                 ++spike_total;
                 event_total += row_ptr[i + 1u] - row_ptr[i];
@@ -86,69 +127,68 @@ static void probe_workload(const snn_network_t *net, snn_state_t *state,
     }
     *out_spike_rate = (double)spike_total / ((double)probe_steps * (double)n);
     *out_events_per_step = (double)event_total / (double)probe_steps;
+    snn_state_free(state);
     free(spikes);
 }
 
-static void bench_cpu(const char *name, const snn_network_t *net,
-                      const float *frames, int warmup, int steps) {
+static void bench_cpu(const char *name, const char *variant, const snn_network_t *net,
+                      const float *frames,
+                      snn_size_t *const idx[FRAME_COUNT], float *const val[FRAME_COUNT],
+                      const snn_size_t count[FRAME_COUNT],
+                      int warmup, int steps, double spike_rate, double events_per_step) {
     const snn_size_t n = snn_network_neuron_count(net);
     snn_state_t *state = NULL;
-    double spike_rate = 0.0;
-    double events_per_step = 0.0;
     double t0 = 0.0;
-    double t1 = 0.0;
-    double ms_per_step = 0.0;
     int s = 0;
     if (snn_state_create(net, &state) != SNN_OK) {
         fprintf(stderr, "state create failed\n");
         exit(1);
     }
-    probe_workload(net, state, frames, 10, &spike_rate, &events_per_step);
-    if (snn_state_reset(net, state) != SNN_OK) {
-        fprintf(stderr, "state reset failed\n");
-        exit(1);
+    for (s = -warmup; s < steps; ++s) {
+        const unsigned f = (unsigned)(s + warmup) % FRAME_COUNT;
+        if (s == 0) {
+            t0 = now_sec();
+        }
+        if (frames != NULL) {
+            (void)snn_step_cpu(net, state, frame_at(frames, n, s + warmup), NULL);
+        } else {
+            (void)snn_state_inject_current(net, state, idx[f], val[f], count[f]);
+            (void)snn_step_cpu(net, state, NULL, NULL);
+        }
     }
-    for (s = 0; s < warmup; ++s) {
-        (void)snn_step_cpu(net, state, frame_at(frames, n, s), NULL);
-    }
-    t0 = now_sec();
-    for (s = 0; s < steps; ++s) {
-        (void)snn_step_cpu(net, state, frame_at(frames, n, s), NULL);
-    }
-    t1 = now_sec();
-    ms_per_step = (t1 - t0) * 1000.0 / (double)steps;
-    printf("%-26s cpu  %10.3f ms/step %10.1f steps/s  %5.2f%% spikes  %8.2f Mevents/s\n",
-           name, ms_per_step, 1000.0 / ms_per_step, spike_rate * 100.0,
-           events_per_step / (ms_per_step * 1000.0));
+    report(name, variant, (now_sec() - t0) * 1000.0 / (double)steps, spike_rate, events_per_step);
     snn_state_free(state);
 }
 
-static void bench_gpu(const char *name, const snn_network_t *net,
-                      const float *frames, int warmup, int steps,
+static void bench_gpu(const char *name, const char *variant, const snn_network_t *net,
+                      const float *frames,
+                      snn_size_t *const idx[FRAME_COUNT], float *const val[FRAME_COUNT],
+                      const snn_size_t count[FRAME_COUNT],
+                      int warmup, int steps, int with_download,
                       double spike_rate, double events_per_step) {
     const snn_size_t n = snn_network_neuron_count(net);
     snn_cuda_context_t *ctx = NULL;
     uint8_t *spikes = (uint8_t *)malloc((size_t)n);
     double t0 = 0.0;
-    double t1 = 0.0;
-    double ms_per_step = 0.0;
     int s = 0;
     if (spikes == NULL || snn_cuda_create(net, NULL, &ctx) != SNN_OK) {
         fprintf(stderr, "cuda create failed\n");
         exit(1);
     }
-    for (s = 0; s < warmup; ++s) {
-        (void)snn_cuda_step(ctx, frame_at(frames, n, s), spikes);
+    for (s = -warmup; s < steps; ++s) {
+        const unsigned f = (unsigned)(s + warmup) % FRAME_COUNT;
+        if (s == 0) {
+            t0 = now_sec();
+        }
+        if (idx != NULL) {
+            (void)snn_cuda_inject_current(ctx, idx[f], val[f], count[f]);
+            (void)snn_cuda_step(ctx, NULL, with_download ? spikes : NULL);
+        } else {
+            (void)snn_cuda_step(ctx, frames != NULL ? frame_at(frames, n, s + warmup) : NULL,
+                                with_download ? spikes : NULL);
+        }
     }
-    t0 = now_sec();
-    for (s = 0; s < steps; ++s) {
-        (void)snn_cuda_step(ctx, frame_at(frames, n, s), spikes);
-    }
-    t1 = now_sec();
-    ms_per_step = (t1 - t0) * 1000.0 / (double)steps;
-    printf("%-26s gpu  %10.3f ms/step %10.1f steps/s  %5.2f%% spikes  %8.2f Mevents/s\n",
-           name, ms_per_step, 1000.0 / ms_per_step, spike_rate * 100.0,
-           events_per_step / (ms_per_step * 1000.0));
+    report(name, variant, (now_sec() - t0) * 1000.0 / (double)steps, spike_rate, events_per_step);
     snn_cuda_free(ctx);
     free(spikes);
 }
@@ -157,22 +197,29 @@ static void run_workload(const char *name, const snn_network_t *net,
                          unsigned drive_percent, int cpu_steps, int gpu_steps) {
     const snn_size_t n = snn_network_neuron_count(net);
     float *frames = make_frames(n, drive_percent, 1.5f);
-    snn_state_t *probe_state = NULL;
+    snn_size_t *idx[FRAME_COUNT] = {0};
+    float *val[FRAME_COUNT] = {0};
+    snn_size_t count[FRAME_COUNT] = {0};
     double spike_rate = 0.0;
     double events_per_step = 0.0;
+    unsigned f = 0;
     if (frames == NULL) {
         fprintf(stderr, "frame alloc failed\n");
         exit(1);
     }
-    bench_cpu(name, net, frames, 5, cpu_steps);
+    make_event_frames(frames, n, idx, val, count);
+    probe_workload(net, frames, 10, &spike_rate, &events_per_step);
+    bench_cpu(name, "cpu", net, frames, NULL, NULL, NULL, 5, cpu_steps, spike_rate, events_per_step);
+    bench_cpu(name, "cpu-ev", net, NULL, idx, val, count, 5, cpu_steps, spike_rate, events_per_step);
     if (snn_cuda_available()) {
-        if (snn_state_create(net, &probe_state) != SNN_OK) {
-            fprintf(stderr, "probe state create failed\n");
-            exit(1);
-        }
-        probe_workload(net, probe_state, frames, 10, &spike_rate, &events_per_step);
-        snn_state_free(probe_state);
-        bench_gpu(name, net, frames, 30, gpu_steps, spike_rate, events_per_step);
+        bench_gpu(name, "gpu", net, frames, NULL, NULL, NULL, 30, gpu_steps, 1, spike_rate, events_per_step);
+        bench_gpu(name, "gpu-nd", net, frames, NULL, NULL, NULL, 30, gpu_steps, 0, spike_rate, events_per_step);
+        bench_gpu(name, "gpu-ni", net, NULL, NULL, NULL, NULL, 30, gpu_steps, 0, spike_rate, events_per_step);
+        bench_gpu(name, "gpu-ev", net, NULL, idx, val, count, 30, gpu_steps, 1, spike_rate, events_per_step);
+    }
+    for (f = 0; f < FRAME_COUNT; ++f) {
+        free(idx[f]);
+        free(val[f]);
     }
     free(frames);
 }

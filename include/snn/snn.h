@@ -133,6 +133,19 @@ snn_status_t snn_state_reset(const snn_network_t *network, snn_state_t *state);
 snn_status_t snn_state_copy_voltage(const snn_state_t *state, float *out_voltage, snn_size_t count);
 snn_status_t snn_state_copy_spikes(const snn_state_t *state, uint8_t *out_spikes, snn_size_t count);
 
+/*
+ * Sparse input events: adds values[k] * input_scale into the current consumed
+ * by the next step at neuron indices[k]. Combined with a NULL external_current
+ * step this drives only the given neurons instead of streaming a dense
+ * n-float buffer (and, on CUDA, uploads only the event arrays). Duplicate
+ * indices accumulate. Nothing is applied if any index is out of range.
+ */
+snn_status_t snn_state_inject_current(const snn_network_t *network,
+                                      snn_state_t *state,
+                                      const snn_size_t *indices,
+                                      const float *values,
+                                      snn_size_t count);
+
 snn_status_t snn_step_cpu(const snn_network_t *network,
                           snn_state_t *state,
                           const float *external_current,
@@ -152,6 +165,13 @@ snn_status_t snn_cuda_create(const snn_network_t *network,
                              snn_cuda_context_t **out_context);
 void snn_cuda_free(snn_cuda_context_t *context);
 snn_cuda_mode_t snn_cuda_context_mode(const snn_cuda_context_t *context);
+/* CUDA twin of snn_state_inject_current. Device event buffers are allocated
+ * lazily and grow to the largest count seen. Accumulation order for duplicate
+ * indices is nondeterministic (atomic scatter). */
+snn_status_t snn_cuda_inject_current(snn_cuda_context_t *context,
+                                     const snn_size_t *host_indices,
+                                     const float *host_values,
+                                     snn_size_t count);
 snn_status_t snn_cuda_step(snn_cuda_context_t *context,
                            const float *host_external_current,
                            uint8_t *host_out_spikes);

@@ -654,6 +654,32 @@ snn_status_t snn_state_copy_spikes(const snn_state_t *state, uint8_t *out_spikes
     return SNN_OK;
 }
 
+snn_status_t snn_state_inject_current(const snn_network_t *network,
+                                      snn_state_t *state,
+                                      const snn_size_t *indices,
+                                      const float *values,
+                                      snn_size_t count) {
+    snn_size_t k = 0;
+    if (network == NULL || state == NULL || state->neuron_count != network->neuron_count ||
+        (count != 0 && (indices == NULL || values == NULL))) {
+        return SNN_ERR_INVALID_ARGUMENT;
+    }
+    /* Validate before applying so a bad batch leaves the state untouched. */
+    for (k = 0; k < count; ++k) {
+        if (indices[k] >= state->neuron_count) {
+            return SNN_ERR_INVALID_ARGUMENT;
+        }
+    }
+    {
+        const float input_scale = network->lif.input_scale;
+        float *restrict current = state->current;
+        for (k = 0; k < count; ++k) {
+            current[indices[k]] += values[k] * input_scale;
+        }
+    }
+    return SNN_OK;
+}
+
 snn_status_t snn_step_cpu(const snn_network_t *network,
                           snn_state_t *state,
                           const float *external_current,
@@ -678,30 +704,46 @@ snn_status_t snn_step_cpu(const snn_network_t *network,
         const float v_threshold = network->lif.v_threshold;
         const float input_scale = network->lif.input_scale;
         const uint32_t refractory_steps = network->lif.refractory_steps;
-        /*
-         * With no external input, read from next_current instead: the swap
-         * invariant keeps it all-zeros at step entry, and 0.0f * input_scale
-         * contributes exactly zero, so the loop body stays branch-free without
-         * a NULL check (a guarded load would block vectorization).
-         */
-        const float *restrict ext = external_current != NULL ? external_current : state->next_current;
+        const float *restrict ext = external_current;
         float *restrict voltage = state->voltage;
         float *restrict current = state->current;
         uint32_t *restrict refractory = state->refractory;
         uint8_t *restrict spikes = state->spikes;
+        if (ext != NULL) {
 #ifdef SNN_ENABLE_OPENMP
 #pragma omp parallel for schedule(static) if (n > 8192u)
 #endif
-        for (i = 0; i < n; ++i) {
-            const uint32_t r = refractory[i];
-            const float in = ext[i] * input_scale;
-            const float v_int = v_rest + (voltage[i] - v_rest) * decay + current[i] + in;
-            const int active = r == 0u;
-            const int fired = active & (v_int >= v_threshold);
-            current[i] = 0.0f;
-            voltage[i] = (active & (fired ^ 1)) ? v_int : v_reset;
-            refractory[i] = fired ? refractory_steps : r - (uint32_t)(r != 0u);
-            spikes[i] = (uint8_t)fired;
+            for (i = 0; i < n; ++i) {
+                const uint32_t r = refractory[i];
+                const float in = ext[i] * input_scale;
+                const float v_int = v_rest + (voltage[i] - v_rest) * decay + current[i] + in;
+                const int active = r == 0u;
+                const int fired = active & (v_int >= v_threshold);
+                current[i] = 0.0f;
+                voltage[i] = (active & (fired ^ 1)) ? v_int : v_reset;
+                refractory[i] = fired ? refractory_steps : r - (uint32_t)(r != 0u);
+                spikes[i] = (uint8_t)fired;
+            }
+        } else {
+            /*
+             * Same body with the external term folded to the +0.0f literal the
+             * CUDA kernel adds when no input is bound, keeping both backends
+             * bit-identical while skipping the dense external read (which
+             * would otherwise stream n floats of zeros).
+             */
+#ifdef SNN_ENABLE_OPENMP
+#pragma omp parallel for schedule(static) if (n > 8192u)
+#endif
+            for (i = 0; i < n; ++i) {
+                const uint32_t r = refractory[i];
+                const float v_int = v_rest + (voltage[i] - v_rest) * decay + current[i] + 0.0f;
+                const int active = r == 0u;
+                const int fired = active & (v_int >= v_threshold);
+                current[i] = 0.0f;
+                voltage[i] = (active & (fired ^ 1)) ? v_int : v_reset;
+                refractory[i] = fired ? refractory_steps : r - (uint32_t)(r != 0u);
+                spikes[i] = (uint8_t)fired;
+            }
         }
     }
     if (out_spikes != NULL) {

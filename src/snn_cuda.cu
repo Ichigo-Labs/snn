@@ -28,6 +28,10 @@ struct snn_cuda_context {
     float *d_external;
     uint32_t *d_refractory;
     uint8_t *d_spikes;
+    /* Lazily grown staging for snn_cuda_inject_current event batches. */
+    snn_size_t *d_inject_indices;
+    float *d_inject_values;
+    snn_size_t inject_capacity;
 };
 
 static snn_status_t cuda_status(cudaError_t err) {
@@ -182,6 +186,17 @@ __global__ static void init_state_kernel(snn_size_t n,
         external[i] = 0.0f;
         refractory[i] = 0u;
         spikes[i] = 0u;
+    }
+}
+
+__global__ static void inject_kernel(snn_size_t count,
+                                     float input_scale,
+                                     const snn_size_t *indices,
+                                     const float *values,
+                                     float *current) {
+    const snn_size_t stride = (snn_size_t)blockDim.x * (snn_size_t)gridDim.x;
+    for (snn_size_t k = (snn_size_t)blockIdx.x * (snn_size_t)blockDim.x + (snn_size_t)threadIdx.x; k < count; k += stride) {
+        atomicAdd(&current[indices[k]], values[k] * input_scale);
     }
 }
 
@@ -463,6 +478,8 @@ void snn_cuda_free(snn_cuda_context_t *context) {
         cudaFree(context->d_external);
         cudaFree(context->d_refractory);
         cudaFree(context->d_spikes);
+        cudaFree(context->d_inject_indices);
+        cudaFree(context->d_inject_values);
         free(context->h_chunk_row_ptr);
         free(context);
     }
@@ -470,6 +487,56 @@ void snn_cuda_free(snn_cuda_context_t *context) {
 
 snn_cuda_mode_t snn_cuda_context_mode(const snn_cuda_context_t *context) {
     return context == 0 ? SNN_CUDA_MODE_NONE : context->mode;
+}
+
+snn_status_t snn_cuda_inject_current(snn_cuda_context_t *context,
+                                     const snn_size_t *host_indices,
+                                     const float *host_values,
+                                     snn_size_t count) {
+    snn_size_t k = 0;
+    snn_status_t st = SNN_OK;
+    if (context == 0 || (count != 0u && (host_indices == 0 || host_values == 0))) {
+        return SNN_ERR_INVALID_ARGUMENT;
+    }
+    if (count == 0u) {
+        return SNN_OK;
+    }
+    /* Validate on the host before any device work so a bad batch is a no-op. */
+    for (k = 0; k < count; ++k) {
+        if (host_indices[k] >= context->neuron_count) {
+            return SNN_ERR_INVALID_ARGUMENT;
+        }
+    }
+    if (count > context->inject_capacity) {
+        cudaFree(context->d_inject_indices);
+        cudaFree(context->d_inject_values);
+        context->d_inject_indices = 0;
+        context->d_inject_values = 0;
+        context->inject_capacity = 0;
+        st = cuda_malloc_array((void **)&context->d_inject_indices, count, sizeof(snn_size_t));
+        if (st != SNN_OK) {
+            return st;
+        }
+        st = cuda_malloc_array((void **)&context->d_inject_values, count, sizeof(float));
+        if (st != SNN_OK) {
+            return st;
+        }
+        context->inject_capacity = count;
+    }
+    st = cuda_copy_to_device(context->d_inject_indices, host_indices, count, sizeof(snn_size_t));
+    if (st != SNN_OK) {
+        return st;
+    }
+    st = cuda_copy_to_device(context->d_inject_values, host_values, count, sizeof(float));
+    if (st != SNN_OK) {
+        return st;
+    }
+    inject_kernel<<<launch_blocks(count), 256>>>(count,
+                                                 context->lif.input_scale,
+                                                 context->d_inject_indices,
+                                                 context->d_inject_values,
+                                                 context->d_current);
+    return cuda_check_launch();
 }
 
 static snn_status_t upload_external_if_present(snn_cuda_context_t *ctx, const float *host_external_current) {

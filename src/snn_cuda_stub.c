@@ -47,6 +47,19 @@ snn_status_t snn_cuda_step(snn_cuda_context_t *context,
     return SNN_ERR_UNSUPPORTED;
 }
 
+snn_status_t snn_cuda_inject_current(snn_cuda_context_t *context,
+                                     const snn_size_t *host_indices,
+                                     const float *host_values,
+                                     snn_size_t count) {
+    (void)host_indices;
+    (void)host_values;
+    (void)count;
+    if (context == 0) {
+        return SNN_ERR_INVALID_ARGUMENT;
+    }
+    return SNN_ERR_UNSUPPORTED;
+}
+
 snn_status_t snn_cuda_download_voltage(const snn_cuda_context_t *context,
                                        float *host_voltage,
                                        snn_size_t count) {

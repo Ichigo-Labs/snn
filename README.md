@@ -14,6 +14,10 @@ A compact, performance-oriented leaky-integrate-and-fire SNN library in C with a
   - Feed-forward layered networks, dense or fixed fanout.
   - Random recurrent pools with configurable fanout and weight range.
 - LIF hyperparameters are runtime configurable: `dt_ms`, membrane time constant, rest/reset/threshold voltages, input scale, refractory steps.
+- Sparse input events (`snn_state_inject_current` / `snn_cuda_inject_current`):
+  drive only the active neurons instead of streaming a dense per-neuron buffer
+  each step — on CUDA this replaces the dominant per-step host-to-device
+  upload with a transfer proportional to input activity.
 - Memory-planning API for dry-run sizing before allocating massive networks.
 - Optional OpenMP parallelization of the CPU path (`-DSNN_ENABLE_OPENMP=ON`):
   the per-neuron membrane update splits across threads directly, and synaptic

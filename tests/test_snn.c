@@ -498,6 +498,66 @@ static void test_run_cpu(void) {
     snn_network_free(net);
 }
 
+static void test_inject_current(void) {
+    snn_network_t *net = NULL;
+    snn_state_t *state = NULL;
+    snn_lif_params_t p = snn_default_lif_params();
+    snn_size_t row[] = {0, 1, 2, 2};
+    snn_size_t col[] = {1, 2};
+    float w[] = {0.8f, 1.1f};
+    snn_size_t idx[] = {0, 0};
+    float val[] = {0.7f, 0.6f};
+    snn_size_t bad_idx[] = {0, 3};
+    uint8_t spikes[3] = {0};
+
+    ASSERT_EQ_INT(snn_build_custom_csr(3, 2, row, col, w, &p, &net), SNN_OK);
+    ASSERT_EQ_INT(snn_state_create(net, &state), SNN_OK);
+
+    ASSERT_EQ_INT(snn_state_inject_current(NULL, state, idx, val, 2), SNN_ERR_INVALID_ARGUMENT);
+    ASSERT_EQ_INT(snn_state_inject_current(net, NULL, idx, val, 2), SNN_ERR_INVALID_ARGUMENT);
+    ASSERT_EQ_INT(snn_state_inject_current(net, state, NULL, val, 2), SNN_ERR_INVALID_ARGUMENT);
+    ASSERT_EQ_INT(snn_state_inject_current(net, state, idx, NULL, 2), SNN_ERR_INVALID_ARGUMENT);
+    ASSERT_EQ_INT(snn_state_inject_current(net, state, NULL, NULL, 0), SNN_OK);
+
+    /* An out-of-range index rejects the whole batch without side effects. */
+    ASSERT_EQ_INT(snn_state_inject_current(net, state, bad_idx, val, 2), SNN_ERR_INVALID_ARGUMENT);
+    ASSERT_EQ_INT(snn_step_cpu(net, state, NULL, spikes), SNN_OK);
+    ASSERT_EQ_INT(spikes[0], 0);
+
+    /* Duplicate indices accumulate: 0.7 + 0.6 crosses the 1.0 threshold. */
+    ASSERT_EQ_INT(snn_state_inject_current(net, state, idx, val, 2), SNN_OK);
+    ASSERT_EQ_INT(snn_step_cpu(net, state, NULL, spikes), SNN_OK);
+    ASSERT_EQ_INT(spikes[0], 1);
+    ASSERT_EQ_INT(spikes[1], 0);
+
+    /* input_scale is applied to injected values. */
+    p.input_scale = 2.0f;
+    ASSERT_EQ_INT(snn_network_set_lif_params(net, &p), SNN_OK);
+    ASSERT_EQ_INT(snn_state_reset(net, state), SNN_OK);
+    {
+        snn_size_t one_idx[] = {2};
+        float one_val[] = {0.6f};
+        ASSERT_EQ_INT(snn_state_inject_current(net, state, one_idx, one_val, 1), SNN_OK);
+        ASSERT_EQ_INT(snn_step_cpu(net, state, NULL, spikes), SNN_OK);
+        ASSERT_EQ_INT(spikes[2], 1);
+    }
+
+    /* Mismatched state/network pair is rejected. */
+    {
+        snn_network_t *other_net = NULL;
+        snn_state_t *other_state = NULL;
+        snn_size_t row2[] = {0, 0};
+        ASSERT_EQ_INT(snn_build_custom_csr(1, 0, row2, NULL, NULL, NULL, &other_net), SNN_OK);
+        ASSERT_EQ_INT(snn_state_create(other_net, &other_state), SNN_OK);
+        ASSERT_EQ_INT(snn_state_inject_current(net, other_state, idx, val, 2), SNN_ERR_INVALID_ARGUMENT);
+        snn_state_free(other_state);
+        snn_network_free(other_net);
+    }
+
+    snn_state_free(state);
+    snn_network_free(net);
+}
+
 static int spikes_match(const uint8_t *a, const uint8_t *b, snn_size_t n) {
     snn_size_t i = 0;
     for (i = 0; i < n; ++i) {
@@ -558,6 +618,7 @@ static void test_cuda_api(void) {
     ASSERT_EQ_INT(cfg.prefer_streaming, 0);
     ASSERT_EQ_INT(snn_cuda_context_mode(NULL), SNN_CUDA_MODE_NONE);
     ASSERT_EQ_INT(snn_cuda_step(NULL, NULL, NULL), SNN_ERR_INVALID_ARGUMENT);
+    ASSERT_EQ_INT(snn_cuda_inject_current(NULL, NULL, NULL, 0), SNN_ERR_INVALID_ARGUMENT);
     ASSERT_EQ_INT(snn_cuda_download_voltage(NULL, voltage, 3), SNN_ERR_INVALID_ARGUMENT);
     ASSERT_EQ_INT(snn_cuda_create(NULL, &cfg, &ctx), SNN_ERR_INVALID_ARGUMENT);
 
@@ -571,6 +632,7 @@ static void test_cuda_api(void) {
 #ifdef SNN_WITH_CUDA
         if (!SNN_WITH_CUDA) {
             ASSERT_EQ_INT(snn_cuda_step(snn_test_nonnull_cuda_context(), NULL, NULL), SNN_ERR_UNSUPPORTED);
+            ASSERT_EQ_INT(snn_cuda_inject_current(snn_test_nonnull_cuda_context(), NULL, NULL, 0), SNN_ERR_UNSUPPORTED);
             ASSERT_EQ_INT(snn_cuda_download_voltage(snn_test_nonnull_cuda_context(), voltage, 3), SNN_ERR_UNSUPPORTED);
         }
 #endif
@@ -629,6 +691,82 @@ static void test_cuda_api(void) {
             ctx = NULL;
         }
         snn_network_free(znet);
+    }
+
+    /* Sparse input injection: CPU/GPU parity plus staging growth and reuse. */
+    {
+        snn_lif_params_t p = snn_default_lif_params();
+        snn_random_pool_config_t rp = snn_default_random_pool_config(5000, 16);
+        snn_network_t *inet = NULL;
+        snn_state_t *icpu = NULL;
+        snn_size_t *idx = (snn_size_t *)malloc(5000 * sizeof(snn_size_t));
+        float *val = (float *)malloc(5000 * sizeof(float));
+        uint8_t *cs = (uint8_t *)malloc(5000);
+        uint8_t *gs = (uint8_t *)malloc(5000);
+        int s = 0;
+        rp.seed = 99;
+        rp.weight_min = 0.05f;
+        rp.weight_max = 0.10f;
+        ASSERT_TRUE(idx != NULL && val != NULL && cs != NULL && gs != NULL);
+        ASSERT_EQ_INT(snn_build_random_pool(&rp, &p, &inet), SNN_OK);
+        ASSERT_EQ_INT(snn_state_create(inet, &icpu), SNN_OK);
+        ASSERT_EQ_INT(snn_cuda_create(inet, &cfg, &ctx), SNN_OK);
+        for (s = 0; s < 8; ++s) {
+            snn_size_t count = 0;
+            snn_size_t i2 = 0;
+            /* Varying event counts: the device staging grows, then is reused. */
+            for (i2 = (snn_size_t)s; i2 < 5000u; i2 += 7u + (snn_size_t)(s % 3)) {
+                idx[count] = i2;
+                val[count] = 1.5f;
+                ++count;
+            }
+            ASSERT_EQ_INT(snn_state_inject_current(inet, icpu, idx, val, count), SNN_OK);
+            ASSERT_EQ_INT(snn_cuda_inject_current(ctx, idx, val, count), SNN_OK);
+            ASSERT_EQ_INT(snn_step_cpu(inet, icpu, NULL, cs), SNN_OK);
+            ASSERT_EQ_INT(snn_cuda_step(ctx, NULL, gs), SNN_OK);
+            ASSERT_TRUE(spikes_match(cs, gs, 5000));
+        }
+        /* Validation and the count == 0 fast path. */
+        ASSERT_EQ_INT(snn_cuda_inject_current(ctx, NULL, NULL, 0), SNN_OK);
+        ASSERT_EQ_INT(snn_cuda_inject_current(ctx, NULL, val, 5), SNN_ERR_INVALID_ARGUMENT);
+        ASSERT_EQ_INT(snn_cuda_inject_current(ctx, idx, NULL, 5), SNN_ERR_INVALID_ARGUMENT);
+        idx[0] = 5000;
+        ASSERT_EQ_INT(snn_cuda_inject_current(ctx, idx, val, 1), SNN_ERR_INVALID_ARGUMENT);
+        idx[0] = 0;
+#ifdef SNN_ENABLE_TEST_HOOKS
+        /* Fault injection through every inject seam on a fresh context:
+         * grow-path cudaMallocs (#0 indices, #1 values), the indices upload
+         * right after a fresh grow (#2), then with capacity established the
+         * values upload (#1) and the kernel launch (#2). */
+        {
+            snn_cuda_context_t *fctx = NULL;
+            ASSERT_EQ_INT(snn_cuda_create(inet, &cfg, &fctx), SNN_OK);
+            snn_test_cuda_set_fail_after(0); /* indices cudaMalloc */
+            ASSERT_EQ_INT(snn_cuda_inject_current(fctx, idx, val, 8), SNN_ERR_CUDA);
+            snn_test_cuda_disable_failure();
+            snn_test_cuda_set_fail_after(1); /* values cudaMalloc */
+            ASSERT_EQ_INT(snn_cuda_inject_current(fctx, idx, val, 8), SNN_ERR_CUDA);
+            snn_test_cuda_disable_failure();
+            snn_test_cuda_set_fail_after(2); /* indices upload after fresh grow */
+            ASSERT_EQ_INT(snn_cuda_inject_current(fctx, idx, val, 8), SNN_ERR_CUDA);
+            snn_test_cuda_disable_failure();
+            snn_test_cuda_set_fail_after(1); /* values upload, capacity reused */
+            ASSERT_EQ_INT(snn_cuda_inject_current(fctx, idx, val, 8), SNN_ERR_CUDA);
+            snn_test_cuda_disable_failure();
+            snn_test_cuda_set_fail_after(2); /* kernel launch */
+            ASSERT_EQ_INT(snn_cuda_inject_current(fctx, idx, val, 8), SNN_ERR_CUDA);
+            snn_test_cuda_disable_failure();
+            snn_cuda_free(fctx);
+        }
+#endif
+        snn_cuda_free(ctx);
+        ctx = NULL;
+        snn_state_free(icpu);
+        snn_network_free(inet);
+        free(idx);
+        free(val);
+        free(cs);
+        free(gs);
     }
 
     /* Scale + parity: random pool, FULL and STREAMING (multi-chunk). */
@@ -848,6 +986,7 @@ int main(void) {
     test_random_pool_builder();
     test_cpu_state_and_steps();
     test_run_cpu();
+    test_inject_current();
     test_cuda_api();
     printf("all tests passed\n");
     return 0;
