@@ -1,5 +1,7 @@
 # SNN: C + CUDA Spiking Neural Network library
 
+[![CI](https://github.com/Ichigo-Labs/snn/actions/workflows/ci.yml/badge.svg)](https://github.com/Ichigo-Labs/snn/actions/workflows/ci.yml)
+
 A compact, performance-oriented leaky-integrate-and-fire SNN library in C with an optional CUDA backend.
 
 ## Highlights
@@ -86,6 +88,14 @@ Both configurations report 100% for every gated source file. Coverage of the CUD
 error/edge paths (device allocation failures, driver errors, streaming clamps) is
 achieved with a compile-time fault-injection layer that is enabled only under
 `SNN_ENABLE_TEST_HOOKS` and compiled out of production builds.
+
+CI (GitHub Actions) runs the CPU-side matrix on every push: Release tests
+(serial and OpenMP), the 100% coverage gate, ASan+UBSan (serial and OpenMP),
+ThreadSanitizer over the parallel step, and a coverage-guided libFuzzer smoke
+of the builder/step API (`fuzz/fuzz_api.c` — build commands in its header).
+The CUDA configurations (GPU tests, the CUDA coverage gate, CPU/GPU bitwise
+parity, and `compute-sanitizer`) require a device and remain a local
+pre-push gate.
 
 Note on scope: gcov measures the **host** code of the `.cu` translation unit
 (control flow, VRAM policy, chunk scheduling, error handling). Code that runs

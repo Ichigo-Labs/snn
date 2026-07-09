@@ -1,0 +1,98 @@
+# CPU-side verification matrix. Hosted runners have no GPU, so the CUDA
+# configurations (build-omp tests, the CUDA coverage gate, CPU/GPU parity,
+# compute-sanitizer) remain a local pre-push gate — see README "Coverage".
+name: CI
+
+on:
+  push:
+    branches: [master, main]
+  pull_request:
+
+jobs:
+  tests:
+    name: tests (${{ matrix.name }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: serial
+            flags: ""
+          - name: openmp
+            flags: -DSNN_ENABLE_OPENMP=ON
+    steps:
+      - uses: actions/checkout@v4
+      - name: Configure
+        run: cmake -S . -B build -DSNN_ENABLE_CUDA=OFF ${{ matrix.flags }}
+      - name: Build
+        run: cmake --build build -j
+      - name: Test
+        run: ctest --test-dir build --output-on-failure
+
+  coverage:
+    name: coverage gate (100%)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Configure
+        run: cmake -S . -B build -DSNN_ENABLE_CUDA=OFF -DSNN_ENABLE_COVERAGE=ON
+      - name: Build
+        run: cmake --build build -j
+      - name: Test
+        run: ctest --test-dir build --output-on-failure
+      - name: Enforce 100% line coverage
+        run: python3 scripts/coverage.py build 100
+
+  sanitizers:
+    name: asan+ubsan (${{ matrix.name }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: serial
+            flags: ""
+          - name: openmp
+            flags: -DSNN_ENABLE_OPENMP=ON
+    steps:
+      - uses: actions/checkout@v4
+      - name: Configure
+        run: >
+          cmake -S . -B build -DSNN_ENABLE_CUDA=OFF ${{ matrix.flags }}
+          -DCMAKE_C_FLAGS="-fsanitize=address,undefined -fno-sanitize-recover=all -g"
+          -DCMAKE_EXE_LINKER_FLAGS="-fsanitize=address,undefined"
+      - name: Build
+        run: cmake --build build -j
+      - name: Test
+        run: ASAN_OPTIONS=detect_leaks=1 ctest --test-dir build --output-on-failure
+
+  tsan:
+    name: tsan (openmp)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install clang + libomp
+        run: sudo apt-get update && sudo apt-get install -y clang libomp-dev
+      - name: Configure
+        run: >
+          cmake -S . -B build -DSNN_ENABLE_CUDA=OFF -DSNN_ENABLE_OPENMP=ON
+          -DCMAKE_C_COMPILER=clang
+          -DCMAKE_C_FLAGS="-fsanitize=thread -g"
+          -DCMAKE_EXE_LINKER_FLAGS="-fsanitize=thread"
+      - name: Build
+        run: cmake --build build -j
+      - name: Test
+        run: ctest --test-dir build --output-on-failure
+
+  fuzz:
+    name: fuzz smoke (libFuzzer)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build fuzz target
+        run: >
+          clang -std=c99 -O1 -g -fsanitize=fuzzer,address,undefined
+          -fno-sanitize-recover=all -Iinclude -Isrc
+          src/snn.c src/snn_cuda_stub.c fuzz/fuzz_api.c -lm -o fuzz_api
+      - name: Run coverage-guided smoke
+        run: ASAN_OPTIONS=detect_leaks=1 ./fuzz_api -runs=200000 -max_len=768 -print_final_stats=1
