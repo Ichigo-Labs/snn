@@ -638,71 +638,83 @@ snn_status_t snn_step_cpu(const snn_network_t *network,
                           snn_state_t *state,
                           const float *external_current,
                           uint8_t *out_spikes) {
-    const snn_lif_params_t *lif = network == NULL ? NULL : &network->lif;
-    const float decay = network == NULL ? 0.0f : network->decay;
     snn_size_t i = 0;
     if (network == NULL || state == NULL || state->neuron_count != network->neuron_count) {
         return SNN_ERR_INVALID_ARGUMENT;
     }
-    state->spike_count = 0u;
     /*
      * Membrane integration is embarrassingly parallel: iteration i reads and
-     * writes only index i. It is parallelized when the library is built with
-     * SNN_ENABLE_OPENMP. Synaptic propagation below is left serial so the CPU
-     * path stays a deterministic, bit-exact reference for the CUDA backend
-     * (scatter-add ordering would otherwise become nondeterministic).
+     * writes only index i. The LIF parameters are hoisted into locals and the
+     * state arrays are restrict-qualified because they are all float buffers
+     * the compiler would otherwise have to assume alias each other; together
+     * with the branch-free body this lets the loop auto-vectorize (and split
+     * across threads when built with SNN_ENABLE_OPENMP).
      */
+    {
+        const snn_size_t n = network->neuron_count;
+        const float decay = network->decay;
+        const float v_rest = network->lif.v_rest;
+        const float v_reset = network->lif.v_reset;
+        const float v_threshold = network->lif.v_threshold;
+        const float input_scale = network->lif.input_scale;
+        const uint32_t refractory_steps = network->lif.refractory_steps;
+        /*
+         * With no external input, read from next_current instead: the swap
+         * invariant keeps it all-zeros at step entry, and 0.0f * input_scale
+         * contributes exactly zero, so the loop body stays branch-free without
+         * a NULL check (a guarded load would block vectorization).
+         */
+        const float *restrict ext = external_current != NULL ? external_current : state->next_current;
+        float *restrict voltage = state->voltage;
+        float *restrict current = state->current;
+        uint32_t *restrict refractory = state->refractory;
+        uint8_t *restrict spikes = state->spikes;
 #ifdef SNN_ENABLE_OPENMP
-#pragma omp parallel for schedule(static)
+#pragma omp parallel for schedule(static) if (n > 8192u)
 #endif
-    for (i = 0; i < network->neuron_count; ++i) {
-        const float ext = external_current == NULL ? 0.0f : external_current[i] * lif->input_scale;
-        const float current = state->current[i];
-        uint8_t spiked = 0u;
-        state->current[i] = 0.0f;
-        if (state->refractory[i] != 0u) {
-            state->refractory[i] -= 1u;
-            state->voltage[i] = lif->v_reset;
-        } else {
-            state->voltage[i] = lif->v_rest + (state->voltage[i] - lif->v_rest) * decay + current + ext;
-            if (state->voltage[i] >= lif->v_threshold) {
-                spiked = 1u;
-                state->voltage[i] = lif->v_reset;
-                state->refractory[i] = lif->refractory_steps;
+        for (i = 0; i < n; ++i) {
+            const uint32_t r = refractory[i];
+            const float in = ext[i] * input_scale;
+            const float v_int = v_rest + (voltage[i] - v_rest) * decay + current[i] + in;
+            const int active = r == 0u;
+            const int fired = active & (v_int >= v_threshold);
+            current[i] = 0.0f;
+            voltage[i] = (active & (fired ^ 1)) ? v_int : v_reset;
+            refractory[i] = fired ? refractory_steps : r - (uint32_t)(r != 0u);
+            spikes[i] = (uint8_t)fired;
+        }
+    }
+    if (out_spikes != NULL) {
+        memcpy(out_spikes, state->spikes, (size_t)(network->neuron_count * (uint64_t)sizeof(uint8_t)));
+    }
+    /*
+     * Synaptic propagation stays serial so the CPU path remains a
+     * deterministic, bit-exact reference for the CUDA backend (scatter-add
+     * ordering would otherwise become nondeterministic). The scan doubles as
+     * the spike-index compaction; collecting indices inside the integration
+     * loop would serialize it.
+     */
+    {
+        const snn_size_t *restrict row_ptr = network->row_ptr;
+        const snn_size_t *restrict col_idx = network->col_idx;
+        const float *restrict weights = network->weights;
+        const uint8_t *restrict spikes = state->spikes;
+        snn_size_t *restrict spike_indices = state->spike_indices;
+        float *restrict next_current = state->next_current;
+        snn_size_t spike_count = 0;
+        for (i = 0; i < network->neuron_count; ++i) {
+            snn_size_t edge = 0;
+            if (spikes[i] == 0u) {
+                continue;
+            }
+            spike_indices[spike_count] = i;
+            ++spike_count;
+            for (edge = row_ptr[i]; edge < row_ptr[i + 1u]; ++edge) {
+                next_current[col_idx[edge]] += weights[edge];
             }
         }
-        state->spikes[i] = spiked;
-#ifndef SNN_ENABLE_OPENMP
-        if (spiked != 0u) {
-            state->spike_indices[state->spike_count] = i;
-            ++state->spike_count;
-        }
-#endif
-        if (out_spikes != NULL) {
-            out_spikes[i] = spiked;
-        }
+        state->spike_count = spike_count;
     }
-#ifdef SNN_ENABLE_OPENMP
-    for (i = 0; i < network->neuron_count; ++i) {
-        snn_size_t edge = 0;
-        if (state->spikes[i] == 0u) {
-            continue;
-        }
-        state->spike_indices[state->spike_count] = i;
-        ++state->spike_count;
-        for (edge = network->row_ptr[i]; edge < network->row_ptr[i + 1u]; ++edge) {
-            state->next_current[network->col_idx[edge]] += network->weights[edge];
-        }
-    }
-#else
-    for (i = 0; i < state->spike_count; ++i) {
-        snn_size_t edge = 0;
-        const snn_size_t pre = state->spike_indices[i];
-        for (edge = network->row_ptr[pre]; edge < network->row_ptr[pre + 1u]; ++edge) {
-            state->next_current[network->col_idx[edge]] += network->weights[edge];
-        }
-    }
-#endif
     {
         float *tmp = state->current;
         state->current = state->next_current;

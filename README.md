@@ -28,6 +28,7 @@ ctest --test-dir build --output-on-failure
 ```
 
 If CUDA is disabled or unavailable, the CPU library builds with API-compatible CUDA stubs.
+The build type defaults to Release when unset, so the simulation loops are optimized out of the box.
 
 For a multi-core CPU speedup on large networks, enable OpenMP:
 
@@ -35,6 +36,22 @@ For a multi-core CPU speedup on large networks, enable OpenMP:
 cmake -S . -B build -DSNN_ENABLE_CUDA=ON -DSNN_ENABLE_OPENMP=ON -DSNN_BUILD_TESTS=ON
 cmake --build build -j
 ```
+
+`-DSNN_ENABLE_NATIVE_ARCH=ON` additionally compiles the CPU library with
+`-march=native` (wider SIMD for the vectorized membrane update, non-portable
+binaries; may relax the bit-exact CPU/GPU spike parity through FMA contraction).
+
+## Benchmarks
+
+```bash
+cmake -S . -B build-bench -DSNN_BUILD_BENCHMARKS=ON -DSNN_BUILD_TESTS=OFF
+cmake --build build-bench -j
+./build-bench/step_throughput
+```
+
+`step_throughput` measures ms/step on an integrate-bound workload (2M neurons,
+no synapses) and a propagation-bound one (200k-neuron random pool, fanout 64,
+~30% of neurons spiking per step), on CPU and, when a device is present, GPU.
 
 ## Coverage
 

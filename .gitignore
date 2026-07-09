@@ -1,10 +1,5 @@
 build/
-build-coverage/
-build-prod/
-build-cpu/
-build-omp/
-build-cov/
-build-cudacov/
+build-*/
 *.gcda
 *.gcno
 *.gcov

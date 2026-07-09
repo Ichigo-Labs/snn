@@ -194,60 +194,54 @@ __global__ static void integrate_kernel(snn_size_t n,
                                         uint32_t *refractory,
                                         uint8_t *spikes) {
     const snn_size_t stride = (snn_size_t)blockDim.x * (snn_size_t)gridDim.x;
+    /* Branch-free body mirroring snn_step_cpu: no intra-warp divergence
+     * between refractory and active neurons, and bit-identical arithmetic. */
     for (snn_size_t i = (snn_size_t)blockIdx.x * (snn_size_t)blockDim.x + (snn_size_t)threadIdx.x; i < n; i += stride) {
-        const float current_i = current[i];
-        const float ext = external == 0 ? 0.0f : external[i] * lif.input_scale;
-        uint8_t spiked = 0u;
+        const uint32_t r = refractory[i];
+        const float in = external == 0 ? 0.0f : external[i] * lif.input_scale;
+        const float v_int = lif.v_rest + (voltage[i] - lif.v_rest) * decay + current[i] + in;
+        const int active = r == 0u;
+        const int fired = active & (v_int >= lif.v_threshold);
         current[i] = 0.0f;
-        if (refractory[i] != 0u) {
-            refractory[i] -= 1u;
-            voltage[i] = lif.v_reset;
-        } else {
-            const float v = lif.v_rest + (voltage[i] - lif.v_rest) * decay + current_i + ext;
-            if (v >= lif.v_threshold) {
-                spiked = 1u;
-                voltage[i] = lif.v_reset;
-                refractory[i] = lif.refractory_steps;
-            } else {
-                voltage[i] = v;
+        voltage[i] = (active & (fired ^ 1)) ? v_int : lif.v_reset;
+        refractory[i] = fired ? lif.refractory_steps : r - (uint32_t)(r != 0u);
+        spikes[i] = (uint8_t)fired;
+    }
+}
+
+/*
+ * Warp-aggregated propagation: each lane scans one row (coalesced spike
+ * reads), then the warp ballots which of its 32 rows spiked and processes
+ * those rows one at a time with all 32 lanes striding the row's edge range
+ * together (coalesced col_idx/weights reads, no per-thread serialization of
+ * dense rows). Empty warps fall through the ballot at the cost of one read.
+ *
+ * Serves both VRAM modes: FULL passes row0 = 0 with the resident topology,
+ * STREAMING passes the chunk's first row with a chunk-rebased row_ptr (rows
+ * index the chunk arrays; spikes stay indexed by absolute neuron id).
+ */
+__global__ static void propagate_kernel(snn_size_t row0,
+                                        snn_size_t rows,
+                                        const uint8_t *spikes,
+                                        const snn_size_t *row_ptr,
+                                        const snn_size_t *col_idx,
+                                        const float *weights,
+                                        float *next_current) {
+    const snn_size_t stride = (snn_size_t)blockDim.x * (snn_size_t)gridDim.x;
+    const unsigned int lane = (unsigned int)threadIdx.x & 31u;
+    for (snn_size_t base = (snn_size_t)blockIdx.x * (snn_size_t)blockDim.x + (snn_size_t)threadIdx.x;
+         base - lane < rows;
+         base += stride) {
+        const int my_spike = base < rows && spikes[row0 + base] != 0u;
+        unsigned int ballot = __ballot_sync(0xffffffffu, my_spike);
+        while (ballot != 0u) {
+            const unsigned int src = (unsigned int)__ffs((int)ballot) - 1u;
+            const snn_size_t row = base - lane + src;
+            const snn_size_t end = row_ptr[row + 1u];
+            ballot &= ballot - 1u;
+            for (snn_size_t edge = row_ptr[row] + lane; edge < end; edge += 32u) {
+                atomicAdd(&next_current[col_idx[edge]], weights[edge]);
             }
-        }
-        spikes[i] = spiked;
-    }
-}
-
-__global__ static void propagate_full_kernel(snn_size_t n,
-                                             const uint8_t *spikes,
-                                             const snn_size_t *row_ptr,
-                                             const snn_size_t *col_idx,
-                                             const float *weights,
-                                             float *next_current) {
-    const snn_size_t stride = (snn_size_t)blockDim.x * (snn_size_t)gridDim.x;
-    for (snn_size_t pre = (snn_size_t)blockIdx.x * (snn_size_t)blockDim.x + (snn_size_t)threadIdx.x; pre < n; pre += stride) {
-        if (spikes[pre] == 0u) {
-            continue;
-        }
-        for (snn_size_t edge = row_ptr[pre]; edge < row_ptr[pre + 1u]; ++edge) {
-            atomicAdd(&next_current[col_idx[edge]], weights[edge]);
-        }
-    }
-}
-
-__global__ static void propagate_chunk_kernel(snn_size_t row0,
-                                              snn_size_t rows,
-                                              const uint8_t *spikes,
-                                              const snn_size_t *row_ptr,
-                                              const snn_size_t *col_idx,
-                                              const float *weights,
-                                              float *next_current) {
-    const snn_size_t stride = (snn_size_t)blockDim.x * (snn_size_t)gridDim.x;
-    for (snn_size_t local = (snn_size_t)blockIdx.x * (snn_size_t)blockDim.x + (snn_size_t)threadIdx.x; local < rows; local += stride) {
-        const snn_size_t pre = row0 + local;
-        if (spikes[pre] == 0u) {
-            continue;
-        }
-        for (snn_size_t edge = row_ptr[local]; edge < row_ptr[local + 1u]; ++edge) {
-            atomicAdd(&next_current[col_idx[edge]], weights[edge]);
         }
     }
 }
@@ -532,13 +526,13 @@ static snn_status_t stream_propagate(snn_cuda_context_t *ctx) {
                 return st;
             }
         }
-        propagate_chunk_kernel<<<launch_blocks(rows), 256>>>(row_begin,
-                                                             rows,
-                                                             ctx->d_spikes,
-                                                             ctx->d_chunk_row_ptr,
-                                                             ctx->d_chunk_col_idx,
-                                                             ctx->d_chunk_weights,
-                                                             ctx->d_next_current);
+        propagate_kernel<<<launch_blocks(rows), 256>>>(row_begin,
+                                                       rows,
+                                                       ctx->d_spikes,
+                                                       ctx->d_chunk_row_ptr,
+                                                       ctx->d_chunk_col_idx,
+                                                       ctx->d_chunk_weights,
+                                                       ctx->d_next_current);
         st = cuda_check_launch();
         if (st != SNN_OK) {
             return st;
@@ -573,12 +567,13 @@ snn_status_t snn_cuda_step(snn_cuda_context_t *context,
         return st;
     }
     if (context->mode == SNN_CUDA_MODE_FULL) {
-        propagate_full_kernel<<<launch_blocks(context->neuron_count), 256>>>(context->neuron_count,
-                                                                            context->d_spikes,
-                                                                            context->d_row_ptr,
-                                                                            context->d_col_idx,
-                                                                            context->d_weights,
-                                                                            context->d_next_current);
+        propagate_kernel<<<launch_blocks(context->neuron_count), 256>>>(0u,
+                                                                        context->neuron_count,
+                                                                        context->d_spikes,
+                                                                        context->d_row_ptr,
+                                                                        context->d_col_idx,
+                                                                        context->d_weights,
+                                                                        context->d_next_current);
         st = cuda_check_launch();
     } else {
         /* A successfully created context is always FULL or STREAMING. */

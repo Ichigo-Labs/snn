@@ -796,7 +796,7 @@ static void test_cuda_api(void) {
         snn_test_cuda_set_fail_after(1); /* integrate launch */
         ASSERT_EQ_INT(snn_cuda_step(ctx, in, sp), SNN_ERR_CUDA);
         snn_test_cuda_disable_failure();
-        snn_test_cuda_set_fail_after(2); /* propagate_full launch */
+        snn_test_cuda_set_fail_after(2); /* propagate launch */
         ASSERT_EQ_INT(snn_cuda_step(ctx, in, sp), SNN_ERR_CUDA);
         snn_test_cuda_disable_failure();
         snn_test_cuda_set_fail_after(3); /* spikes device-to-host copy */
