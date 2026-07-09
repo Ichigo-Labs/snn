@@ -1,2 +1,0 @@
-# Empty dependencies file for test_snn.
-# This may be replaced when dependencies are built.

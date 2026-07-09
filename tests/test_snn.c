@@ -106,6 +106,8 @@ static void test_memory_plans(void) {
     ASSERT_TRUE(plan.col_index_bytes == sizeof(snn_size_t));
     ASSERT_TRUE(plan.weight_bytes == sizeof(float));
     ASSERT_TRUE(plan.host_topology_bytes == plan.row_ptr_bytes + plan.col_index_bytes + plan.weight_bytes);
+    ASSERT_TRUE(plan.host_state_bytes == plan.device_state_bytes + 2u * sizeof(snn_size_t));
+    ASSERT_TRUE(plan.host_total_bytes == plan.host_topology_bytes + plan.host_state_bytes);
     ASSERT_TRUE(plan.device_total_full_bytes > plan.device_topology_bytes);
     ASSERT_TRUE(plan.device_streaming_min_bytes < plan.device_total_full_bytes);
     ASSERT_EQ_INT(plan.overflowed, 0);
@@ -197,6 +199,10 @@ static void test_overflow_and_allocation_failures(void) {
     snn_test_disable_alloc_failure();
 
     snn_test_set_alloc_fail_after(2);
+    ASSERT_EQ_INT(snn_state_create(net, &state), SNN_ERR_OUT_OF_MEMORY);
+    snn_test_disable_alloc_failure();
+
+    snn_test_set_alloc_fail_after(6); /* spike_indices, the last of the 7 state allocations */
     ASSERT_EQ_INT(snn_state_create(net, &state), SNN_ERR_OUT_OF_MEMORY);
     snn_test_disable_alloc_failure();
     snn_network_free(net);
@@ -787,13 +793,13 @@ static void test_cuda_api(void) {
         snn_test_cuda_set_fail_after(0); /* external upload */
         ASSERT_EQ_INT(snn_cuda_step(ctx, in, sp), SNN_ERR_CUDA);
         snn_test_cuda_disable_failure();
-        snn_test_cuda_set_fail_after(1); /* zero_float launch */
+        snn_test_cuda_set_fail_after(1); /* integrate launch */
         ASSERT_EQ_INT(snn_cuda_step(ctx, in, sp), SNN_ERR_CUDA);
         snn_test_cuda_disable_failure();
-        snn_test_cuda_set_fail_after(2); /* integrate launch */
+        snn_test_cuda_set_fail_after(2); /* propagate_full launch */
         ASSERT_EQ_INT(snn_cuda_step(ctx, in, sp), SNN_ERR_CUDA);
         snn_test_cuda_disable_failure();
-        snn_test_cuda_set_fail_after(3); /* propagate_full launch */
+        snn_test_cuda_set_fail_after(3); /* spikes device-to-host copy */
         ASSERT_EQ_INT(snn_cuda_step(ctx, in, sp), SNN_ERR_CUDA);
         snn_test_cuda_disable_failure();
         snn_test_cuda_set_fail_after(0); /* download voltage copy */
@@ -809,16 +815,16 @@ static void test_cuda_api(void) {
             sc.max_stream_rows = 64;
             sc.max_stream_synapses = 2000;
             ASSERT_EQ_INT(snn_cuda_create(fn, &sc, &ctx), SNN_OK);
-            snn_test_cuda_set_fail_after(3); /* first chunk row_ptr copy (after upload+2 launches) */
+            snn_test_cuda_set_fail_after(2); /* first chunk row_ptr copy (after upload+integrate launch) */
             ASSERT_EQ_INT(snn_cuda_step(ctx, in, sp), SNN_ERR_CUDA);
             snn_test_cuda_disable_failure();
-            snn_test_cuda_set_fail_after(4); /* first chunk col_idx copy */
+            snn_test_cuda_set_fail_after(3); /* first chunk col_idx copy */
             ASSERT_EQ_INT(snn_cuda_step(ctx, in, sp), SNN_ERR_CUDA);
             snn_test_cuda_disable_failure();
-            snn_test_cuda_set_fail_after(5); /* first chunk weights copy */
+            snn_test_cuda_set_fail_after(4); /* first chunk weights copy */
             ASSERT_EQ_INT(snn_cuda_step(ctx, in, sp), SNN_ERR_CUDA);
             snn_test_cuda_disable_failure();
-            snn_test_cuda_set_fail_after(6); /* first chunk kernel launch */
+            snn_test_cuda_set_fail_after(5); /* first chunk kernel launch */
             ASSERT_EQ_INT(snn_cuda_step(ctx, in, sp), SNN_ERR_CUDA);
             snn_test_cuda_disable_failure();
             snn_cuda_free(ctx);

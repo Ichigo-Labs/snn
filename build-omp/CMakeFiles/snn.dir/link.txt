@@ -1,2 +1,0 @@
-/usr/bin/ar qc libsnn.a CMakeFiles/snn_cpu.dir/src/snn.c.o CMakeFiles/snn_cuda_obj.dir/src/snn_cuda.cu.o
-/usr/bin/ranlib libsnn.a

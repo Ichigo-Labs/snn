@@ -99,6 +99,10 @@ static snn_lif_params_t effective_params(const snn_lif_params_t *params) {
     return params != NULL ? *params : snn_default_lif_params();
 }
 
+static float lif_decay(const snn_lif_params_t *params) {
+    return expf(-params->dt_ms / params->membrane_tau_ms);
+}
+
 static snn_status_t allocate_network(snn_size_t neuron_count,
                                      snn_size_t synapse_count,
                                      snn_architecture_t architecture,
@@ -137,6 +141,7 @@ static snn_status_t allocate_network(snn_size_t neuron_count,
     network->synapse_count = synapse_count;
     network->architecture = architecture;
     network->lif = lif;
+    network->decay = lif_decay(&lif);
     (void)row_bytes;
     *out_network = network;
     return SNN_OK;
@@ -319,6 +324,7 @@ snn_status_t snn_estimate_memory_for_counts(snn_size_t neuron_count,
     uint64_t state_float_bytes = 0;
     uint64_t refractory_bytes = 0;
     uint64_t spike_bytes = 0;
+    uint64_t spike_index_bytes = 0;
     uint64_t state_bytes = 0;
     uint64_t streaming_min = 0;
     if (out_plan == NULL || neuron_count == 0) {
@@ -338,8 +344,10 @@ snn_status_t snn_estimate_memory_for_counts(snn_size_t neuron_count,
         !bytes_for_array_u64(state_floats, sizeof(float), &state_float_bytes) ||
         !bytes_for_array_u64(neuron_count, sizeof(uint32_t), &refractory_bytes) ||
         !bytes_for_array_u64(neuron_count, sizeof(uint8_t), &spike_bytes) ||
+        !bytes_for_array_u64(neuron_count, sizeof(snn_size_t), &spike_index_bytes) ||
         !checked_add_u64(state_float_bytes, refractory_bytes, &state_bytes) ||
         !checked_add_u64(state_bytes, spike_bytes, &state_bytes) ||
+        !checked_add_u64(state_bytes, spike_index_bytes, &state_bytes) ||
         !checked_add_u64(state_bytes, sizeof(snn_size_t) * 2u + sizeof(snn_size_t) + sizeof(float), &streaming_min)) {
         out_plan->overflowed = 1;
         return SNN_ERR_OVERFLOW;
@@ -348,13 +356,15 @@ snn_status_t snn_estimate_memory_for_counts(snn_size_t neuron_count,
     out_plan->col_index_bytes = col;
     out_plan->weight_bytes = weights;
     out_plan->host_topology_bytes = topology;
-    out_plan->device_topology_bytes = topology;
-    out_plan->device_state_bytes = state_bytes;
-    out_plan->device_streaming_min_bytes = streaming_min;
-    if (!checked_add_u64(topology, state_bytes, &out_plan->device_total_full_bytes)) {
+    out_plan->host_state_bytes = state_bytes;
+    out_plan->device_state_bytes = state_bytes - spike_index_bytes;
+    if (!checked_add_u64(topology, state_bytes, &out_plan->host_total_bytes)) {
         out_plan->overflowed = 1;
         return SNN_ERR_OVERFLOW;
     }
+    out_plan->device_topology_bytes = topology;
+    out_plan->device_streaming_min_bytes = streaming_min - spike_index_bytes;
+    (void)checked_add_u64(topology, out_plan->device_state_bytes, &out_plan->device_total_full_bytes);
     return SNN_OK;
 }
 
@@ -546,6 +556,7 @@ snn_status_t snn_network_set_lif_params(snn_network_t *network, const snn_lif_pa
         return SNN_ERR_INVALID_ARGUMENT;
     }
     network->lif = lif;
+    network->decay = lif_decay(&lif);
     return SNN_OK;
 }
 
@@ -565,8 +576,9 @@ snn_status_t snn_state_create(const snn_network_t *network, snn_state_t **out_st
     state->next_current = (float *)calloc_u64(network->neuron_count, sizeof(float));
     state->refractory = (uint32_t *)calloc_u64(network->neuron_count, sizeof(uint32_t));
     state->spikes = (uint8_t *)calloc_u64(network->neuron_count, sizeof(uint8_t));
+    state->spike_indices = (snn_size_t *)malloc_bytes_u64(network->neuron_count * (uint64_t)sizeof(snn_size_t));
     if (state->voltage == NULL || state->current == NULL || state->next_current == NULL ||
-        state->refractory == NULL || state->spikes == NULL) {
+        state->refractory == NULL || state->spikes == NULL || state->spike_indices == NULL) {
         snn_state_free(state);
         return SNN_ERR_OUT_OF_MEMORY;
     }
@@ -581,6 +593,7 @@ void snn_state_free(snn_state_t *state) {
         free(state->next_current);
         free(state->refractory);
         free(state->spikes);
+        free(state->spike_indices);
         free(state);
     }
 }
@@ -590,6 +603,7 @@ snn_status_t snn_state_reset(const snn_network_t *network, snn_state_t *state) {
     if (network == NULL || state == NULL || state->neuron_count != network->neuron_count) {
         return SNN_ERR_INVALID_ARGUMENT;
     }
+    state->spike_count = 0u;
     for (i = 0; i < state->neuron_count; ++i) {
         state->voltage[i] = network->lif.v_rest;
         state->current[i] = 0.0f;
@@ -624,12 +638,13 @@ snn_status_t snn_step_cpu(const snn_network_t *network,
                           snn_state_t *state,
                           const float *external_current,
                           uint8_t *out_spikes) {
-    const float decay = network == NULL ? 0.0f : expf(-network->lif.dt_ms / network->lif.membrane_tau_ms);
+    const snn_lif_params_t *lif = network == NULL ? NULL : &network->lif;
+    const float decay = network == NULL ? 0.0f : network->decay;
     snn_size_t i = 0;
     if (network == NULL || state == NULL || state->neuron_count != network->neuron_count) {
         return SNN_ERR_INVALID_ARGUMENT;
     }
-    memset(state->next_current, 0, (size_t)(network->neuron_count * (uint64_t)sizeof(float)));
+    state->spike_count = 0u;
     /*
      * Membrane integration is embarrassingly parallel: iteration i reads and
      * writes only index i. It is parallelized when the library is built with
@@ -641,33 +656,53 @@ snn_status_t snn_step_cpu(const snn_network_t *network,
 #pragma omp parallel for schedule(static)
 #endif
     for (i = 0; i < network->neuron_count; ++i) {
-        const float ext = external_current == NULL ? 0.0f : external_current[i] * network->lif.input_scale;
+        const float ext = external_current == NULL ? 0.0f : external_current[i] * lif->input_scale;
+        const float current = state->current[i];
         uint8_t spiked = 0u;
+        state->current[i] = 0.0f;
         if (state->refractory[i] != 0u) {
             state->refractory[i] -= 1u;
-            state->voltage[i] = network->lif.v_reset;
+            state->voltage[i] = lif->v_reset;
         } else {
-            state->voltage[i] = network->lif.v_rest + (state->voltage[i] - network->lif.v_rest) * decay + state->current[i] + ext;
-            if (state->voltage[i] >= network->lif.v_threshold) {
+            state->voltage[i] = lif->v_rest + (state->voltage[i] - lif->v_rest) * decay + current + ext;
+            if (state->voltage[i] >= lif->v_threshold) {
                 spiked = 1u;
-                state->voltage[i] = network->lif.v_reset;
-                state->refractory[i] = network->lif.refractory_steps;
+                state->voltage[i] = lif->v_reset;
+                state->refractory[i] = lif->refractory_steps;
             }
         }
         state->spikes[i] = spiked;
+#ifndef SNN_ENABLE_OPENMP
+        if (spiked != 0u) {
+            state->spike_indices[state->spike_count] = i;
+            ++state->spike_count;
+        }
+#endif
         if (out_spikes != NULL) {
             out_spikes[i] = spiked;
         }
     }
+#ifdef SNN_ENABLE_OPENMP
     for (i = 0; i < network->neuron_count; ++i) {
         snn_size_t edge = 0;
         if (state->spikes[i] == 0u) {
             continue;
         }
+        state->spike_indices[state->spike_count] = i;
+        ++state->spike_count;
         for (edge = network->row_ptr[i]; edge < network->row_ptr[i + 1u]; ++edge) {
             state->next_current[network->col_idx[edge]] += network->weights[edge];
         }
     }
+#else
+    for (i = 0; i < state->spike_count; ++i) {
+        snn_size_t edge = 0;
+        const snn_size_t pre = state->spike_indices[i];
+        for (edge = network->row_ptr[pre]; edge < network->row_ptr[pre + 1u]; ++edge) {
+            state->next_current[network->col_idx[edge]] += network->weights[edge];
+        }
+    }
+#endif
     {
         float *tmp = state->current;
         state->current = state->next_current;

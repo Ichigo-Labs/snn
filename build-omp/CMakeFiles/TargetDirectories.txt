@@ -1,7 +1,0 @@
-/mnt/c/code/snn/build-omp/CMakeFiles/snn_cpu.dir
-/mnt/c/code/snn/build-omp/CMakeFiles/snn_cuda_obj.dir
-/mnt/c/code/snn/build-omp/CMakeFiles/snn.dir
-/mnt/c/code/snn/build-omp/CMakeFiles/test_snn.dir
-/mnt/c/code/snn/build-omp/CMakeFiles/test.dir
-/mnt/c/code/snn/build-omp/CMakeFiles/edit_cache.dir
-/mnt/c/code/snn/build-omp/CMakeFiles/rebuild_cache.dir

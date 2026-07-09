@@ -8,6 +8,7 @@ struct snn_network {
     snn_size_t synapse_count;
     snn_architecture_t architecture;
     snn_lif_params_t lif;
+    float decay;
     snn_size_t *row_ptr;
     snn_size_t *col_idx;
     float *weights;
@@ -20,6 +21,8 @@ struct snn_state {
     float *next_current;
     uint32_t *refractory;
     uint8_t *spikes;
+    snn_size_t *spike_indices;
+    snn_size_t spike_count;
 };
 
 #endif /* SNN_INTERNAL_H */

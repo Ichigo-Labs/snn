@@ -63,6 +63,8 @@ typedef struct snn_memory_plan {
     uint64_t col_index_bytes;
     uint64_t weight_bytes;
     uint64_t host_topology_bytes;
+    uint64_t host_state_bytes;
+    uint64_t host_total_bytes;
     uint64_t device_topology_bytes;
     uint64_t device_state_bytes;
     uint64_t device_total_full_bytes;

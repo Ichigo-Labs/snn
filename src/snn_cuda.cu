@@ -2,7 +2,6 @@
 
 #include <cuda_runtime.h>
 
-#include <math.h>
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
@@ -13,6 +12,7 @@ struct snn_cuda_context {
     snn_size_t neuron_count;
     snn_size_t synapse_count;
     snn_lif_params_t lif;
+    float decay;
     snn_size_t *d_row_ptr;
     snn_size_t *d_col_idx;
     float *d_weights;
@@ -185,29 +185,25 @@ __global__ static void init_state_kernel(snn_size_t n,
     }
 }
 
-__global__ static void zero_float_kernel(snn_size_t n, float *values) {
-    const snn_size_t stride = (snn_size_t)blockDim.x * (snn_size_t)gridDim.x;
-    for (snn_size_t i = (snn_size_t)blockIdx.x * (snn_size_t)blockDim.x + (snn_size_t)threadIdx.x; i < n; i += stride) {
-        values[i] = 0.0f;
-    }
-}
-
 __global__ static void integrate_kernel(snn_size_t n,
                                         snn_lif_params_t lif,
                                         float decay,
                                         float *voltage,
-                                        const float *current,
+                                        float *current,
                                         const float *external,
                                         uint32_t *refractory,
                                         uint8_t *spikes) {
     const snn_size_t stride = (snn_size_t)blockDim.x * (snn_size_t)gridDim.x;
     for (snn_size_t i = (snn_size_t)blockIdx.x * (snn_size_t)blockDim.x + (snn_size_t)threadIdx.x; i < n; i += stride) {
+        const float current_i = current[i];
+        const float ext = external == 0 ? 0.0f : external[i] * lif.input_scale;
         uint8_t spiked = 0u;
+        current[i] = 0.0f;
         if (refractory[i] != 0u) {
             refractory[i] -= 1u;
             voltage[i] = lif.v_reset;
         } else {
-            const float v = lif.v_rest + (voltage[i] - lif.v_rest) * decay + current[i] + external[i] * lif.input_scale;
+            const float v = lif.v_rest + (voltage[i] - lif.v_rest) * decay + current_i + ext;
             if (v >= lif.v_threshold) {
                 spiked = 1u;
                 voltage[i] = lif.v_reset;
@@ -435,6 +431,7 @@ snn_status_t snn_cuda_create(const snn_network_t *network,
     ctx->neuron_count = network->neuron_count;
     ctx->synapse_count = network->synapse_count;
     ctx->lif = network->lif;
+    ctx->decay = network->decay;
 
     st = allocate_device_state(ctx);
     if (st != SNN_OK) {
@@ -481,13 +478,13 @@ snn_cuda_mode_t snn_cuda_context_mode(const snn_cuda_context_t *context) {
     return context == 0 ? SNN_CUDA_MODE_NONE : context->mode;
 }
 
-static snn_status_t upload_external_or_zero(snn_cuda_context_t *ctx, const float *host_external_current) {
+static snn_status_t upload_external_if_present(snn_cuda_context_t *ctx, const float *host_external_current) {
     size_t bytes = bytes_for_cuda(ctx->neuron_count, sizeof(float));
+    if (host_external_current == 0) {
+        return SNN_OK;
+    }
     if (cuda_inject_failure()) {
         return SNN_ERR_CUDA;
-    }
-    if (host_external_current == 0) {
-        return cuda_status(cudaMemset(ctx->d_external, 0, bytes));
     }
     return cuda_status(cudaMemcpy(ctx->d_external, host_external_current, bytes, cudaMemcpyHostToDevice));
 }
@@ -559,21 +556,16 @@ snn_status_t snn_cuda_step(snn_cuda_context_t *context,
     if (context == 0) {
         return SNN_ERR_INVALID_ARGUMENT;
     }
-    st = upload_external_or_zero(context, host_external_current);
-    if (st != SNN_OK) {
-        return st;
-    }
-    zero_float_kernel<<<launch_blocks(context->neuron_count), 256>>>(context->neuron_count, context->d_next_current);
-    st = cuda_check_launch();
+    st = upload_external_if_present(context, host_external_current);
     if (st != SNN_OK) {
         return st;
     }
     integrate_kernel<<<launch_blocks(context->neuron_count), 256>>>(context->neuron_count,
                                                                     context->lif,
-                                                                    expf(-context->lif.dt_ms / context->lif.membrane_tau_ms),
+                                                                    context->decay,
                                                                     context->d_voltage,
                                                                     context->d_current,
-                                                                    context->d_external,
+                                                                    host_external_current == 0 ? 0 : context->d_external,
                                                                     context->d_refractory,
                                                                     context->d_spikes);
     st = cuda_check_launch();
