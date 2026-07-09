@@ -367,15 +367,19 @@ static snn_status_t allocate_streaming_topology(snn_cuda_context_t *ctx, const s
         desired_synapses = (available_for_chunks > row_bytes + edge_bytes)
                                ? (snn_size_t)((available_for_chunks - row_bytes) / edge_bytes)
                                : 0u;
-        if (desired_synapses > ctx->synapse_count) {
-            desired_synapses = ctx->synapse_count;
-        }
         if (desired_synapses < max_degree) {
             desired_synapses = max_degree; /* guarantee the densest row still fits */
         }
-        if (desired_synapses == 0u) {
-            desired_synapses = 1u; /* zero-synapse network: keep a valid buffer */
-        }
+    }
+    /* A chunk never needs to hold more than the whole topology. Clamping the
+     * explicit path too keeps bytes_for_cuda()'s no-overflow invariant, which
+     * a caller-supplied max_stream_synapses near 2^61 would otherwise wrap
+     * (undersizing the chunk buffers the per-step copies write into). */
+    if (desired_synapses > ctx->synapse_count) {
+        desired_synapses = ctx->synapse_count;
+    }
+    if (desired_synapses == 0u) {
+        desired_synapses = 1u; /* zero-synapse network: keep a valid buffer */
     }
 
     ctx->h_chunk_row_ptr = (snn_size_t *)cuda_host_malloc((size_t)row_bytes);

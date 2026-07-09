@@ -1045,6 +1045,14 @@ static void test_cuda_api(void) {
         sc.prefer_streaming = 1;
         sc.max_stream_rows = 200000;
         cuda_parity_run(pool, sc, SNN_CUDA_MODE_STREAMING, 3, 11);
+        /* An explicit max_stream_synapses far beyond the edge count (a "no
+         * limit" sentinel) is clamped to the topology size; unclamped, a value
+         * near 2^61 wraps the chunk byte sizing and corrupts device memory. */
+        sc = snn_cuda_default_config();
+        sc.prefer_streaming = 1;
+        sc.max_stream_rows = 512;
+        sc.max_stream_synapses = UINT64_MAX;
+        cuda_parity_run(pool, sc, SNN_CUDA_MODE_STREAMING, 3, 11);
         /*
          * Nonzero rest/reset and a fractional input scale (all dyadic) move
          * the arithmetic away from the all-zeros corner where an FMA-
