@@ -5,7 +5,7 @@ option(SNN_ENABLE_CUDA "Build CUDA backend" ON)
 option(SNN_BUILD_TESTS "Build test suite" ON)
 option(SNN_BUILD_BENCHMARKS "Build benchmark executables" OFF)
 option(SNN_ENABLE_COVERAGE "Build with gcov line coverage instrumentation" OFF)
-option(SNN_ENABLE_OPENMP "Parallelize the CPU membrane-integration phase with OpenMP" OFF)
+option(SNN_ENABLE_OPENMP "Parallelize the CPU simulation step with OpenMP" OFF)
 option(SNN_ENABLE_NATIVE_ARCH "Compile the CPU library with -march=native (faster, non-portable binaries)" OFF)
 
 # An empty build type compiles the hot simulation loops with no optimization;

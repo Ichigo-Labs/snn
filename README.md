@@ -15,9 +15,11 @@ A compact, performance-oriented leaky-integrate-and-fire SNN library in C with a
   - Random recurrent pools with configurable fanout and weight range.
 - LIF hyperparameters are runtime configurable: `dt_ms`, membrane time constant, rest/reset/threshold voltages, input scale, refractory steps.
 - Memory-planning API for dry-run sizing before allocating massive networks.
-- Optional OpenMP parallelization of the CPU membrane-integration phase
-  (`-DSNN_ENABLE_OPENMP=ON`); the CPU path stays bit-exact and deterministic
-  because only the race-free per-neuron phase is parallelized.
+- Optional OpenMP parallelization of the CPU path (`-DSNN_ENABLE_OPENMP=ON`):
+  the per-neuron membrane update splits across threads directly, and synaptic
+  propagation uses per-thread scatter buffers reduced in fixed thread order —
+  results stay reproducible for a fixed thread count, though the summation
+  order (and thus last-bit rounding) may differ from the serial build's.
 
 ## Build
 

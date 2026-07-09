@@ -5,6 +5,10 @@
 #include <stdlib.h>
 #include <string.h>
 
+#ifdef SNN_ENABLE_OPENMP
+#include <omp.h>
+#endif
+
 #ifdef SNN_ENABLE_TEST_HOOKS
 static int64_t g_alloc_fail_after = -1;
 
@@ -582,6 +586,21 @@ snn_status_t snn_state_create(const snn_network_t *network, snn_state_t **out_st
         snn_state_free(state);
         return SNN_ERR_OUT_OF_MEMORY;
     }
+#ifdef SNN_ENABLE_OPENMP
+    state->thread_count = (snn_size_t)omp_get_max_threads();
+    if (state->thread_count > 1u) {
+        uint64_t partial_elems = 0;
+        if (!checked_mul_u64(state->thread_count, network->neuron_count, &partial_elems)) {
+            snn_state_free(state);
+            return SNN_ERR_OUT_OF_MEMORY;
+        }
+        state->thread_partials = (float *)calloc_u64(partial_elems, sizeof(float));
+        if (state->thread_partials == NULL) {
+            snn_state_free(state);
+            return SNN_ERR_OUT_OF_MEMORY;
+        }
+    }
+#endif
     *out_state = state;
     return snn_state_reset(network, state);
 }
@@ -594,6 +613,7 @@ void snn_state_free(snn_state_t *state) {
         free(state->refractory);
         free(state->spikes);
         free(state->spike_indices);
+        free(state->thread_partials);
         free(state);
     }
 }
@@ -688,13 +708,18 @@ snn_status_t snn_step_cpu(const snn_network_t *network,
         memcpy(out_spikes, state->spikes, (size_t)(network->neuron_count * (uint64_t)sizeof(uint8_t)));
     }
     /*
-     * Synaptic propagation stays serial so the CPU path remains a
-     * deterministic, bit-exact reference for the CUDA backend (scatter-add
-     * ordering would otherwise become nondeterministic). The scan doubles as
-     * the spike-index compaction; collecting indices inside the integration
-     * loop would serialize it.
+     * Synaptic propagation. The scan compacts spiking rows into
+     * spike_indices; collecting them inside the integration loop would
+     * serialize it. The scatter itself is deterministic in both variants:
+     * serial applies edges in row order, and the OpenMP variant gives each
+     * thread a fixed contiguous range of the concatenated spiking-edge list
+     * accumulated into a private buffer, then reduces per target in
+     * ascending thread order — reproducible for a fixed thread count,
+     * though rounding may differ from the serial order (the same trade the
+     * CUDA backend's atomic scatter already makes).
      */
     {
+        const snn_size_t n = network->neuron_count;
         const snn_size_t *restrict row_ptr = network->row_ptr;
         const snn_size_t *restrict col_idx = network->col_idx;
         const float *restrict weights = network->weights;
@@ -702,18 +727,80 @@ snn_status_t snn_step_cpu(const snn_network_t *network,
         snn_size_t *restrict spike_indices = state->spike_indices;
         float *restrict next_current = state->next_current;
         snn_size_t spike_count = 0;
-        for (i = 0; i < network->neuron_count; ++i) {
-            snn_size_t edge = 0;
-            if (spikes[i] == 0u) {
-                continue;
-            }
+        int propagated = 0;
+        for (i = 0; i < n; ++i) {
             spike_indices[spike_count] = i;
-            ++spike_count;
-            for (edge = row_ptr[i]; edge < row_ptr[i + 1u]; ++edge) {
-                next_current[col_idx[edge]] += weights[edge];
-            }
+            spike_count += spikes[i];
         }
         state->spike_count = spike_count;
+#ifdef SNN_ENABLE_OPENMP
+        if (state->thread_count > 1u) {
+            uint64_t total_edges = 0;
+            for (i = 0; i < spike_count; ++i) {
+                const snn_size_t pre = spike_indices[i];
+                total_edges += row_ptr[pre + 1u] - row_ptr[pre];
+            }
+            /* Below this the reduction over thread_count * n partials costs
+             * more than the serial scatter it replaces. */
+            if (total_edges >= 65536u && total_edges >= n) {
+                float *restrict partials = state->thread_partials;
+                const snn_size_t threads = state->thread_count;
+#pragma omp parallel num_threads((int)threads)
+                {
+                    const uint64_t team = (uint64_t)omp_get_num_threads();
+                    const uint64_t t = (uint64_t)omp_get_thread_num();
+                    const uint64_t begin = total_edges * t / team;
+                    const uint64_t end = total_edges * (t + 1u) / team;
+                    float *restrict mine = partials + (size_t)(t * n);
+                    uint64_t pos = 0;
+                    snn_size_t s = 0;
+                    /* Skip rows wholly before this thread's edge range. */
+                    while (s < spike_count) {
+                        const snn_size_t pre = spike_indices[s];
+                        const uint64_t degree = row_ptr[pre + 1u] - row_ptr[pre];
+                        if (pos + degree > begin) {
+                            break;
+                        }
+                        pos += degree;
+                        ++s;
+                    }
+                    while (s < spike_count && pos < end) {
+                        const snn_size_t pre = spike_indices[s];
+                        const snn_size_t row_begin = row_ptr[pre];
+                        const uint64_t degree = row_ptr[pre + 1u] - row_begin;
+                        const uint64_t from = begin > pos ? begin - pos : 0u;
+                        const uint64_t to = end - pos < degree ? end - pos : degree;
+                        uint64_t k = 0;
+                        for (k = from; k < to; ++k) {
+                            mine[col_idx[row_begin + k]] += weights[row_begin + k];
+                        }
+                        pos += degree;
+                        ++s;
+                    }
+                }
+#pragma omp parallel for schedule(static)
+                for (i = 0; i < n; ++i) {
+                    float acc = 0.0f;
+                    snn_size_t t = 0;
+                    for (t = 0; t < threads; ++t) {
+                        acc += partials[(size_t)(t * n) + i];
+                        partials[(size_t)(t * n) + i] = 0.0f;
+                    }
+                    next_current[i] += acc;
+                }
+                propagated = 1;
+            }
+        }
+#endif
+        if (!propagated) {
+            for (i = 0; i < spike_count; ++i) {
+                const snn_size_t pre = spike_indices[i];
+                snn_size_t edge = 0;
+                for (edge = row_ptr[pre]; edge < row_ptr[pre + 1u]; ++edge) {
+                    next_current[col_idx[edge]] += weights[edge];
+                }
+            }
+        }
     }
     {
         float *tmp = state->current;

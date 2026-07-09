@@ -23,6 +23,14 @@ struct snn_state {
     uint8_t *spikes;
     snn_size_t *spike_indices;
     snn_size_t spike_count;
+    /*
+     * OpenMP builds only: thread_count * neuron_count floats of per-thread
+     * scatter buffers for parallel synaptic propagation, kept all-zero
+     * between steps by the reduction. NULL/0 in serial builds. Unconditional
+     * fields so every translation unit sees the same struct layout.
+     */
+    float *thread_partials;
+    snn_size_t thread_count;
 };
 
 #endif /* SNN_INTERNAL_H */
