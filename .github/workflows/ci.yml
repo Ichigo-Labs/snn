@@ -1,6 +1,8 @@
 # CPU-side verification matrix. Hosted runners have no GPU, so the CUDA
-# configurations (build-omp tests, the CUDA coverage gate, CPU/GPU parity,
-# compute-sanitizer) remain a local pre-push gate — see README "Coverage".
+# *runtime* configurations (build-omp tests, the CUDA coverage gate, CPU/GPU
+# parity, compute-sanitizer) remain a local pre-push gate — see README
+# "Coverage". The cuda-compile job below still nvcc-compiles the backend so
+# a .cu build break cannot land green.
 name: CI
 
 on:
@@ -28,6 +30,35 @@ jobs:
         run: cmake --build build -j
       - name: Test
         run: ctest --test-dir build --output-on-failure
+
+  cuda-compile:
+    name: cuda compile (no GPU)
+    # 22.04's apt toolkit (CUDA 11.5) matches its default gcc-11 host compiler.
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install CUDA toolkit
+        run: sudo apt-get update && sudo apt-get install -y nvidia-cuda-toolkit
+      - name: Configure
+        run: cmake -S . -B build -DSNN_ENABLE_CUDA=ON
+      - name: Build
+        run: cmake --build build -j
+      - name: Test (no device; exercises the unavailable paths)
+        run: ctest --test-dir build --output-on-failure
+
+  production:
+    name: production config (hooks off) + benchmarks + examples
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Configure
+        run: >
+          cmake -S . -B build -DSNN_ENABLE_CUDA=OFF -DSNN_BUILD_TESTS=OFF
+          -DSNN_BUILD_BENCHMARKS=ON -DSNN_BUILD_EXAMPLES=ON
+      - name: Build
+        run: cmake --build build -j
+      - name: Run example
+        run: ./build/minimal
 
   coverage:
     name: coverage gate (100%)
@@ -91,10 +122,20 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      # Persist the corpus so each run deepens coverage instead of
+      # rediscovering structured inputs from scratch.
+      - name: Restore fuzz corpus
+        uses: actions/cache@v4
+        with:
+          path: corpus
+          key: fuzz-corpus-${{ github.run_id }}
+          restore-keys: fuzz-corpus-
       - name: Build fuzz target
         run: >
           clang -std=c99 -O1 -g -fsanitize=fuzzer,address,undefined
           -fno-sanitize-recover=all -Iinclude -Isrc
           src/snn.c src/snn_cuda_stub.c fuzz/fuzz_api.c -lm -o fuzz_api
       - name: Run coverage-guided smoke
-        run: ASAN_OPTIONS=detect_leaks=1 ./fuzz_api -runs=200000 -max_len=768 -print_final_stats=1
+        run: |
+          mkdir -p corpus
+          ASAN_OPTIONS=detect_leaks=1 ./fuzz_api corpus -runs=200000 -max_len=768 -print_final_stats=1

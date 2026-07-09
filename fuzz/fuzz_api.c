@@ -92,9 +92,11 @@ static void exercise_network(reader_t *r, snn_network_t *net) {
     if (snn_state_create(net, &state) != SNN_OK) {
         return;
     }
+    /* +2 slack: the copy calls below pass capacities above n, so a regression
+     * that copies `count` elements instead of n becomes an ASan OOB. */
     ext = (float *)malloc((size_t)n * sizeof(float));
-    voltage = (float *)malloc((size_t)n * sizeof(float));
-    spikes = (uint8_t *)malloc((size_t)n);
+    voltage = (float *)malloc((size_t)(n + 2u) * sizeof(float));
+    spikes = (uint8_t *)malloc((size_t)(n + 2u));
     if (ext == NULL || voltage == NULL || spikes == NULL) {
         goto done;
     }
@@ -122,13 +124,29 @@ static void exercise_network(reader_t *r, snn_network_t *net) {
             abort(); /* a valid net + state must always step */
         }
     }
-    if (snn_state_copy_voltage(state, voltage, n) != SNN_OK ||
-        snn_state_copy_spikes(state, spikes, n) != SNN_OK ||
+    if (snn_state_copy_voltage(state, voltage, n + (rd_u8(r) % 3u)) != SNN_OK ||
+        snn_state_copy_spikes(state, spikes, n + (rd_u8(r) % 3u)) != SNN_OK ||
         snn_state_reset(net, state) != SNN_OK) {
         abort();
     }
     if (snn_run_cpu(net, state, NULL, 2, 0, NULL, 0) != SNN_OK) {
         abort();
+    }
+    /* Strided run with padding between records: offset-math regressions in
+     * the per-step pointer arithmetic become ASan-visible. */
+    {
+        const snn_size_t stride = n + 1u + (rd_u8(r) % 2u);
+        float *ext2 = (float *)calloc((size_t)(2u * stride), sizeof(float));
+        uint8_t *sp2 = (uint8_t *)malloc((size_t)(2u * stride));
+        if (ext2 != NULL && sp2 != NULL) {
+            ext2[0] = rd_f32(r);
+            ext2[stride] = rd_f32(r);
+            if (snn_run_cpu(net, state, ext2, 2, stride, sp2, stride) != SNN_OK) {
+                abort();
+            }
+        }
+        free(ext2);
+        free(sp2);
     }
 done:
     free(ext);
@@ -265,6 +283,9 @@ static uint64_t xorshift(uint64_t *s) {
 int main(int argc, char **argv) {
     const long iterations = argc > 1 ? strtol(argv[1], NULL, 10) : 100000L;
     uint64_t seed = argc > 2 ? (uint64_t)strtoull(argv[2], NULL, 10) : UINT64_C(0x5eedf00d);
+    if (seed == 0u) {
+        seed = UINT64_C(0x5eedf00d); /* 0 is a xorshift fixed point */
+    }
     uint8_t buf[768];
     long it = 0;
     for (it = 0; it < iterations; ++it) {

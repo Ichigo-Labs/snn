@@ -62,6 +62,11 @@ typedef struct snn_random_pool_config {
  * omp_get_max_threads() * neuron_count floats of propagation scratch per
  * state, and CUDA event injection keeps device staging sized to the largest
  * batch passed to snn_cuda_inject_current.
+ *
+ * device_streaming_min_bytes: computed from counts alone
+ * (snn_estimate_memory_for_counts) it assumes a minimal one-edge topology
+ * chunk; snn_network_memory_plan refines it to the real backend minimum,
+ * whose chunk must hold the network's densest row.
  */
 typedef struct snn_memory_plan {
     snn_size_t neuron_count;
@@ -93,8 +98,12 @@ typedef struct snn_cuda_config {
      * resident per-neuron state and a minimal topology chunk are always
      * allocated, even when they alone exceed the cap. */
     uint64_t max_vram_bytes;
-    snn_size_t max_stream_synapses; /* 0 means auto-size the streamed synapse chunk. */
-    snn_size_t max_stream_rows;     /* 0 means auto-size the streamed row chunk. */
+    /* 0 means auto-size the streamed synapse chunk. A nonzero value must be
+     * at least the network's densest row (max out-degree) or snn_cuda_create
+     * fails with SNN_ERR_INVALID_ARGUMENT; values beyond the total synapse
+     * count are clamped. */
+    snn_size_t max_stream_synapses;
+    snn_size_t max_stream_rows; /* 0 means auto-size the streamed row chunk. */
     int prefer_streaming;
 } snn_cuda_config_t;
 
@@ -173,7 +182,10 @@ snn_status_t snn_run_cpu(const snn_network_t *network,
 snn_cuda_config_t snn_cuda_default_config(void);
 int snn_cuda_available(void);
 /* The network must outlive the context: STREAMING mode reads its topology on
- * every step (FULL mode copies it to the device at create time). */
+ * every step (FULL mode copies it to the device at create time). When CUDA is
+ * unusable, the status distinguishes the cause: SNN_ERR_CUDA means the CUDA
+ * backend found no usable device; SNN_ERR_UNSUPPORTED means the library was
+ * built without the CUDA backend (stubs). */
 snn_status_t snn_cuda_create(const snn_network_t *network,
                              const snn_cuda_config_t *config,
                              snn_cuda_context_t **out_context);

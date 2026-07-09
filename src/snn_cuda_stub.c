@@ -51,11 +51,13 @@ snn_status_t snn_cuda_inject_current(snn_cuda_context_t *context,
                                      const snn_size_t *host_indices,
                                      const float *host_values,
                                      snn_size_t count) {
-    (void)host_indices;
-    (void)host_values;
-    (void)count;
-    if (context == 0) {
+    /* Mirror the real backend's argument contract so code developed against
+     * the stub sees the same status for the same misuse. */
+    if (context == 0 || (count != 0u && (host_indices == 0 || host_values == 0))) {
         return SNN_ERR_INVALID_ARGUMENT;
+    }
+    if (count == 0u) {
+        return SNN_OK;
     }
     return SNN_ERR_UNSUPPORTED;
 }

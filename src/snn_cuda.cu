@@ -428,10 +428,15 @@ snn_status_t snn_cuda_create(const snn_network_t *network,
     uint64_t vram_budget = 0;
     snn_status_t st = SNN_OK;
 
-    if (network == 0 || out_context == 0) {
+    /* Null the out pointer before any other validation so misuse can never
+     * leave it uninitialized (matches the stub's behavior). */
+    if (out_context == 0) {
         return SNN_ERR_INVALID_ARGUMENT;
     }
     *out_context = 0;
+    if (network == 0) {
+        return SNN_ERR_INVALID_ARGUMENT;
+    }
     if (!snn_cuda_available()) {
         return SNN_ERR_CUDA;
     }

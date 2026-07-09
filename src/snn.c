@@ -392,10 +392,32 @@ snn_status_t snn_estimate_memory_for_counts(snn_size_t neuron_count,
 }
 
 snn_status_t snn_network_memory_plan(const snn_network_t *network, snn_memory_plan_t *out_plan) {
+    snn_status_t st = SNN_OK;
+    snn_size_t max_degree = 0;
+    snn_size_t chunk_edges = 0;
+    snn_size_t i = 0;
     if (network == NULL) {
         return SNN_ERR_INVALID_ARGUMENT;
     }
-    return snn_estimate_memory_for_counts(network->neuron_count, network->synapse_count, out_plan);
+    st = snn_estimate_memory_for_counts(network->neuron_count, network->synapse_count, out_plan);
+    if (st != SNN_OK) {
+        return st;
+    }
+    /* Refine the count-based streaming minimum with the actual topology: the
+     * streaming backend never allocates a synapse chunk smaller than the
+     * densest row, so the true minimum holds max(max_degree, 1) edges, not 1.
+     * Cannot overflow: the chunk is a subset of the device topology already
+     * summed into device_total_full_bytes above. */
+    for (i = 0; i < network->neuron_count; ++i) {
+        const snn_size_t degree = network->row_ptr[i + 1u] - network->row_ptr[i];
+        if (degree > max_degree) {
+            max_degree = degree;
+        }
+    }
+    chunk_edges = max_degree > 1u ? max_degree : 1u;
+    out_plan->device_streaming_min_bytes +=
+        (uint64_t)(chunk_edges - 1u) * (uint64_t)(sizeof(snn_size_t) + sizeof(float));
+    return SNN_OK;
 }
 
 snn_status_t snn_build_custom_csr(snn_size_t neuron_count,
@@ -413,6 +435,7 @@ snn_status_t snn_build_custom_csr(snn_size_t neuron_count,
     if (out_network == NULL) {
         return SNN_ERR_INVALID_ARGUMENT;
     }
+    *out_network = NULL;
     st = validate_csr(neuron_count, synapse_count, row_ptr, col_idx, weights);
     if (st != SNN_OK) {
         return st;
@@ -448,6 +471,7 @@ snn_status_t snn_build_feedforward(const snn_feedforward_config_t *config,
     if (out_network == NULL) {
         return SNN_ERR_INVALID_ARGUMENT;
     }
+    *out_network = NULL;
     if (st != SNN_OK) {
         return st;
     }
@@ -504,9 +528,14 @@ snn_status_t snn_build_random_pool(const snn_random_pool_config_t *config,
     if (out_network == NULL) {
         return SNN_ERR_INVALID_ARGUMENT;
     }
+    *out_network = NULL;
+    /* The span check rejects finite bounds whose difference overflows float
+     * (e.g. -3e38..3e38): the interpolation below would otherwise produce
+     * inf/NaN weights, which validate_csr forbids everywhere else. */
     if (config == NULL || config->neuron_count == 0 ||
         (!config->allow_self_connections && config->neuron_count == 1u && config->fanout_per_neuron != 0u) ||
-        !isfinite(config->weight_min) || !isfinite(config->weight_max) || config->weight_max < config->weight_min) {
+        !isfinite(config->weight_min) || !isfinite(config->weight_max) || config->weight_max < config->weight_min ||
+        !isfinite(config->weight_max - config->weight_min)) {
         return SNN_ERR_INVALID_ARGUMENT;
     }
     if (!checked_mul_u64(config->neuron_count, config->fanout_per_neuron, &synapses)) {
@@ -523,11 +552,15 @@ snn_status_t snn_build_random_pool(const snn_random_pool_config_t *config,
         for (j = 0; j < config->fanout_per_neuron; ++j) {
             snn_size_t post = (snn_size_t)(splitmix64_next(&rng) % config->neuron_count);
             const float u = rng_uniform_float(&rng);
+            /* u can round up to exactly 1.0f (~2^-25 per draw), and the span
+             * itself rounds, so the interpolation can overshoot weight_max by
+             * a few ULPs; clamp to keep the documented [min, max] range. */
+            const float w = config->weight_min + (config->weight_max - config->weight_min) * u;
             if (!config->allow_self_connections && post == pre) {
                 post = (post + 1u) % config->neuron_count;
             }
             network->col_idx[edge] = post;
-            network->weights[edge] = config->weight_min + (config->weight_max - config->weight_min) * u;
+            network->weights[edge] = w < config->weight_max ? w : config->weight_max;
             ++edge;
         }
     }
@@ -585,10 +618,15 @@ snn_status_t snn_network_set_lif_params(snn_network_t *network, const snn_lif_pa
 
 snn_status_t snn_state_create(const snn_network_t *network, snn_state_t **out_state) {
     snn_state_t *state = NULL;
-    if (network == NULL || out_state == NULL) {
+    /* Null the out pointer before any other validation so misuse can never
+     * leave it uninitialized (matches the CUDA backend and its stub). */
+    if (out_state == NULL) {
         return SNN_ERR_INVALID_ARGUMENT;
     }
     *out_state = NULL;
+    if (network == NULL) {
+        return SNN_ERR_INVALID_ARGUMENT;
+    }
     state = (snn_state_t *)snn_calloc_impl(1u, sizeof(*state));
     if (state == NULL) {
         return SNN_ERR_OUT_OF_MEMORY;

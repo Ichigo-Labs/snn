@@ -87,14 +87,18 @@ python3 scripts/coverage.py build-cudacov 100
 Both configurations report 100% for every gated source file. Coverage of the CUDA
 error/edge paths (device allocation failures, driver errors, streaming clamps) is
 achieved with a compile-time fault-injection layer that is enabled only under
-`SNN_ENABLE_TEST_HOOKS` and compiled out of production builds.
+`SNN_ENABLE_TEST_HOOKS`. The hooks come along with `SNN_BUILD_TESTS=ON` (the
+default, so development builds can always run the suite); a production library
+without them is a `-DSNN_BUILD_TESTS=OFF` build.
 
 CI (GitHub Actions) runs the CPU-side matrix on every push: Release tests
 (serial and OpenMP), the 100% coverage gate, ASan+UBSan (serial and OpenMP),
-ThreadSanitizer over the parallel step, and a coverage-guided libFuzzer smoke
-of the builder/step API (`fuzz/fuzz_api.c` — build commands in its header).
-The CUDA configurations (GPU tests, the CUDA coverage gate, CPU/GPU bitwise
-parity, and `compute-sanitizer`) require a device and remain a local
+ThreadSanitizer over the parallel step, a GPU-less nvcc compile of the CUDA
+backend, the production configuration (hooks off, benchmarks and examples
+built), and a coverage-guided libFuzzer smoke of the builder/step API with a
+persisted corpus (`fuzz/fuzz_api.c` — build commands in its header).
+The CUDA runtime configurations (GPU tests, the CUDA coverage gate, CPU/GPU
+bitwise parity, and `compute-sanitizer`) require a device and remain a local
 pre-push gate.
 
 Note on scope: gcov measures the **host** code of the `.cu` translation unit

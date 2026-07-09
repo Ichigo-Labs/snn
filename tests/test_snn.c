@@ -120,9 +120,33 @@ static void test_memory_plans(void) {
 
     ASSERT_EQ_INT(snn_network_memory_plan(NULL, &plan), SNN_ERR_INVALID_ARGUMENT);
     ASSERT_EQ_INT(snn_build_custom_csr(2, 1, row, col, w, NULL, &net), SNN_OK);
+    ASSERT_EQ_INT(snn_network_memory_plan(net, NULL), SNN_ERR_INVALID_ARGUMENT);
     ASSERT_EQ_INT(snn_network_memory_plan(net, &plan), SNN_OK);
     ASSERT_EQ_U64(plan.neuron_count, 2);
+    /* Max degree 1: the topology-aware minimum equals the count-based one. */
+    {
+        snn_memory_plan_t by_counts;
+        ASSERT_EQ_INT(snn_estimate_memory_for_counts(2, 1, &by_counts), SNN_OK);
+        ASSERT_EQ_U64(plan.device_streaming_min_bytes, by_counts.device_streaming_min_bytes);
+    }
     snn_network_free(net);
+
+    /* The topology-aware plan reserves the densest row in the minimal
+     * streaming chunk: degree 2 needs one edge (12 bytes) more than the
+     * count-based one-edge assumption. */
+    {
+        snn_network_t *dense = NULL;
+        snn_size_t drow[] = {0, 2, 3, 3};
+        snn_size_t dcol[] = {1, 2, 0};
+        float dw[] = {0.5f, 0.5f, 0.5f};
+        snn_memory_plan_t by_counts;
+        ASSERT_EQ_INT(snn_estimate_memory_for_counts(3, 3, &by_counts), SNN_OK);
+        ASSERT_EQ_INT(snn_build_custom_csr(3, 3, drow, dcol, dw, NULL, &dense), SNN_OK);
+        ASSERT_EQ_INT(snn_network_memory_plan(dense, &plan), SNN_OK);
+        ASSERT_EQ_U64(plan.device_streaming_min_bytes,
+                      by_counts.device_streaming_min_bytes + sizeof(snn_size_t) + sizeof(float));
+        snn_network_free(dense);
+    }
 }
 
 static void test_overflow_and_allocation_failures(void) {
@@ -401,6 +425,27 @@ static void test_random_pool_builder(void) {
     ASSERT_EQ_U64(snn_network_synapse_count(net), 2);
     ASSERT_EQ_U64(snn_network_col_idx(net)[0], 0);
     snn_network_free(net);
+    net = NULL;
+
+    /* Finite bounds whose span overflows float are rejected: the
+     * interpolation would otherwise generate inf/NaN weights, which
+     * validate_csr forbids on the custom-CSR path. */
+    cfg = snn_default_random_pool_config(4, 3);
+    cfg.weight_min = -3.0e38f;
+    cfg.weight_max = 3.0e38f;
+    ASSERT_EQ_INT(snn_build_random_pool(&cfg, NULL, &net), SNN_ERR_INVALID_ARGUMENT);
+
+    /* Seed chosen so the first weight draw rounds up to u == 1.0f exactly
+     * (~2^-25 per edge): with this min/max the span also rounds up, so the
+     * unclamped interpolation overshoots weight_max by 6 ULPs. */
+    cfg = snn_default_random_pool_config(1, 1);
+    cfg.allow_self_connections = 1;
+    cfg.weight_min = -8.0f;
+    cfg.weight_max = 0.3f;
+    cfg.seed = 13629332u;
+    ASSERT_EQ_INT(snn_build_random_pool(&cfg, NULL, &net), SNN_OK);
+    ASSERT_TRUE(snn_network_weights(net)[0] == 0.3f);
+    snn_network_free(net);
 }
 
 static void test_cpu_state_and_steps(void) {
@@ -435,6 +480,19 @@ static void test_cpu_state_and_steps(void) {
     ASSERT_EQ_INT(snn_state_copy_spikes(NULL, copied_spikes, 3), SNN_ERR_INVALID_ARGUMENT);
     ASSERT_EQ_INT(snn_state_copy_spikes(state, NULL, 3), SNN_ERR_INVALID_ARGUMENT);
     ASSERT_EQ_INT(snn_state_copy_spikes(state, small_spikes, 2), SNN_ERR_INVALID_ARGUMENT);
+
+    /* count is a buffer capacity, not a copy length: with count > n exactly
+     * n elements are written and the sentinel tail is untouched. */
+    {
+        float big_v[5] = {9.0f, 9.0f, 9.0f, 9.0f, 9.0f};
+        uint8_t big_s[5] = {7, 7, 7, 7, 7};
+        ASSERT_EQ_INT(snn_state_copy_voltage(state, big_v, 5), SNN_OK);
+        ASSERT_EQ_INT(snn_state_copy_spikes(state, big_s, 5), SNN_OK);
+        ASSERT_NEAR(big_v[0], p.v_rest, 0.0f);
+        ASSERT_TRUE(big_v[3] == 9.0f && big_v[4] == 9.0f);
+        ASSERT_EQ_INT(big_s[0], 0);
+        ASSERT_TRUE(big_s[3] == 7u && big_s[4] == 7u);
+    }
 
     ASSERT_EQ_INT(snn_step_cpu(NULL, state, input0, spikes), SNN_ERR_INVALID_ARGUMENT);
     ASSERT_EQ_INT(snn_step_cpu(net, NULL, input0, spikes), SNN_ERR_INVALID_ARGUMENT);
@@ -509,6 +567,26 @@ static void test_run_cpu(void) {
     ASSERT_EQ_INT(outputs[4], 0);
     ASSERT_EQ_INT(outputs[5], 0);
     ASSERT_EQ_INT(snn_run_cpu(net, state, NULL, 0, 0, NULL, 0), SNN_OK);
+
+    /* Strides larger than the neuron count: each step's records land at the
+     * stride offsets and the padding bytes between them are never touched. */
+    {
+        float in2[9] = {0.0f};
+        uint8_t out2[15];
+        in2[0] = 1.1f; /* step 0 drives neuron 0; steps 1-2 are silent */
+        memset(out2, 0xAA, sizeof(out2));
+        ASSERT_EQ_INT(snn_state_reset(net, state), SNN_OK);
+        ASSERT_EQ_INT(snn_run_cpu(net, state, in2, 3, 3, out2, 5), SNN_OK);
+        ASSERT_EQ_INT(out2[0], 1); /* step 0: driven neuron 0 fires */
+        ASSERT_EQ_INT(out2[1], 0);
+        ASSERT_EQ_INT(out2[5], 0); /* step 1: propagated 1.0 fires neuron 1 */
+        ASSERT_EQ_INT(out2[6], 1);
+        ASSERT_EQ_INT(out2[10], 0); /* step 2: silent */
+        ASSERT_EQ_INT(out2[11], 0);
+        ASSERT_TRUE(out2[2] == 0xAAu && out2[3] == 0xAAu && out2[4] == 0xAAu);
+        ASSERT_TRUE(out2[7] == 0xAAu && out2[8] == 0xAAu && out2[9] == 0xAAu);
+        ASSERT_TRUE(out2[12] == 0xAAu && out2[13] == 0xAAu && out2[14] == 0xAAu);
+    }
     snn_state_free(state);
     snn_network_free(net);
 }
@@ -524,11 +602,13 @@ static int spikes_match(const uint8_t *a, const uint8_t *b, snn_size_t n) {
 }
 
 /*
- * The same driven network stepped with the state's full thread budget and
- * with a state limited to one thread must spike identically: in OpenMP builds
- * this differentially checks the parallel scatter (the workload crosses its
- * engagement threshold) against the serial one; in serial builds it is a
- * plain determinism check.
+ * The same driven network stepped with the state's full thread budget, with
+ * states limited to 2..5 threads, and with a state limited to one thread must
+ * spike identically: in OpenMP builds this differentially checks the parallel
+ * scatter (the workload crosses its engagement threshold) against the serial
+ * one at several team sizes, so an edge-partition boundary bug that cancels
+ * at one team size still trips another; in serial builds it is a plain
+ * determinism check.
  */
 static void test_propagation_thread_invariance(void) {
     snn_lif_params_t p = snn_default_lif_params();
@@ -536,24 +616,36 @@ static void test_propagation_thread_invariance(void) {
     snn_network_t *net = NULL;
     snn_state_t *full = NULL;
     snn_state_t *serial = NULL;
+    snn_state_t *limited[4] = {NULL, NULL, NULL, NULL};
     float *in = (float *)calloc(20000, sizeof(float));
     uint8_t *fs = (uint8_t *)malloc(20000);
     uint8_t *ss = (uint8_t *)malloc(20000);
+    uint8_t *ls = (uint8_t *)malloc(20000);
     int s = 0;
+    int k = 0;
     rp.seed = 777;
-    /* Dyadic weight (2^-4): every current sum is exactly representable, so
-     * spike trains are identical under ANY accumulation order and the exact
-     * equality asserted below is sound rather than probabilistic. */
+    /* All edges share one dyadic weight (2^-4) and in-degrees stay far below
+     * 2^24, so every current sum is an exactly-representable multiple of 2^-4
+     * and identical under ANY accumulation order; the exact equalities
+     * asserted below are sound rather than probabilistic. (Dyadic-ness alone
+     * would not be enough: mixed dyadic weights of different magnitudes can
+     * still round differently per order.) */
     rp.weight_min = 0.0625f;
     rp.weight_max = 0.0625f;
-    ASSERT_TRUE(in != NULL && fs != NULL && ss != NULL);
+    ASSERT_TRUE(in != NULL && fs != NULL && ss != NULL && ls != NULL);
     ASSERT_EQ_INT(snn_build_random_pool(&rp, &p, &net), SNN_OK);
     ASSERT_EQ_INT(snn_state_create(net, &full), SNN_OK);
     ASSERT_EQ_INT(snn_state_create(net, &serial), SNN_OK);
+    for (k = 0; k < 4; ++k) {
+        ASSERT_EQ_INT(snn_state_create(net, &limited[k]), SNN_OK);
+    }
 #ifdef SNN_ENABLE_TEST_HOOKS
     snn_test_state_limit_threads(serial, 1u);
     snn_test_state_limit_threads(NULL, 1u);   /* tolerated */
     snn_test_state_limit_threads(serial, 0u); /* below 1: ignored */
+    for (k = 0; k < 4; ++k) {
+        snn_test_state_limit_threads(limited[k], (snn_size_t)k + 2u);
+    }
 #endif
     for (s = 0; s < 12; ++s) {
         snn_size_t i = 0;
@@ -564,10 +656,18 @@ static void test_propagation_thread_invariance(void) {
         ASSERT_EQ_INT(snn_step_cpu(net, full, in, fs), SNN_OK);
         ASSERT_EQ_INT(snn_step_cpu(net, serial, in, ss), SNN_OK);
         ASSERT_TRUE(spikes_match(fs, ss, 20000));
+        for (k = 0; k < 4; ++k) {
+            ASSERT_EQ_INT(snn_step_cpu(net, limited[k], in, ls), SNN_OK);
+            ASSERT_TRUE(spikes_match(ls, ss, 20000));
+        }
     }
     free(in);
     free(fs);
     free(ss);
+    free(ls);
+    for (k = 0; k < 4; ++k) {
+        snn_state_free(limited[k]);
+    }
     snn_state_free(serial);
     snn_state_free(full);
     snn_network_free(net);
@@ -758,8 +858,10 @@ static void test_inject_current(void) {
 /*
  * Run a network on CPU and on a given CUDA config; assert per-step spike
  * parity and, at the end, bitwise membrane-voltage parity. The voltage check
- * requires the caller to use dyadic weights (order-exact current sums) and
- * relies on the CUDA backend compiling with --fmad=false.
+ * requires the caller to build every edge with ONE shared dyadic weight and
+ * keep in-degree x mantissa-factor far below 2^24 (then all current sums are
+ * exact under any accumulation order — mixed dyadic weights would NOT be
+ * enough), and relies on the CUDA backend compiling with --fmad=false.
  */
 static void cuda_parity_run(snn_network_t *net, snn_cuda_config_t cfg,
                             snn_cuda_mode_t expect_mode, int steps, unsigned seed) {
@@ -830,8 +932,14 @@ static void test_cuda_api(void) {
         ASSERT_TRUE(ctx == NULL);
 #ifdef SNN_WITH_CUDA
         if (!SNN_WITH_CUDA) {
+            /* The stub mirrors the real backend's argument contract: same
+             * status for the same misuse, UNSUPPORTED only for real work. */
+            snn_size_t stub_idx[1] = {0};
+            float stub_val[1] = {1.0f};
             ASSERT_EQ_INT(snn_cuda_step(snn_test_nonnull_cuda_context(), NULL, NULL), SNN_ERR_UNSUPPORTED);
-            ASSERT_EQ_INT(snn_cuda_inject_current(snn_test_nonnull_cuda_context(), NULL, NULL, 0), SNN_ERR_UNSUPPORTED);
+            ASSERT_EQ_INT(snn_cuda_inject_current(snn_test_nonnull_cuda_context(), NULL, NULL, 0), SNN_OK);
+            ASSERT_EQ_INT(snn_cuda_inject_current(snn_test_nonnull_cuda_context(), NULL, NULL, 2), SNN_ERR_INVALID_ARGUMENT);
+            ASSERT_EQ_INT(snn_cuda_inject_current(snn_test_nonnull_cuda_context(), stub_idx, stub_val, 1), SNN_ERR_UNSUPPORTED);
             ASSERT_EQ_INT(snn_cuda_download_voltage(snn_test_nonnull_cuda_context(), voltage, 3), SNN_ERR_UNSUPPORTED);
         }
 #endif
@@ -1200,6 +1308,45 @@ static void test_cuda_api(void) {
         snn_test_cuda_disable_failure();
         snn_cuda_free(ctx);
         ctx = NULL;
+
+        /* The documented contract "if only the final spike download fails,
+         * the step itself has already been applied" — and applied exactly
+         * once: advance a CPU twin past the failed call, then require the
+         * next successful step to stay in bitwise voltage lockstep. */
+        {
+            snn_random_pool_config_t drp = snn_default_random_pool_config(1000, 8);
+            snn_network_t *dnet = NULL;
+            snn_state_t *dcpu = NULL;
+            snn_cuda_context_t *dctx = NULL;
+            float *cv = (float *)calloc(1000, sizeof(float));
+            float *gv = (float *)calloc(1000, sizeof(float));
+            snn_size_t i2 = 0;
+            drp.seed = 31;
+            /* One shared dyadic weight: order-exact sums, bitwise parity. */
+            drp.weight_min = 0.0625f;
+            drp.weight_max = 0.0625f;
+            ASSERT_TRUE(cv != NULL && gv != NULL);
+            ASSERT_EQ_INT(snn_build_random_pool(&drp, &p, &dnet), SNN_OK);
+            ASSERT_EQ_INT(snn_state_create(dnet, &dcpu), SNN_OK);
+            ASSERT_EQ_INT(snn_cuda_create(dnet, &cfg, &dctx), SNN_OK);
+            for (i2 = 0; i2 < 1000u; ++i2) {
+                in[i2] = (i2 % 5u == 0u) ? 1.5f : 0.0f;
+            }
+            ASSERT_EQ_INT(snn_step_cpu(dnet, dcpu, in, NULL), SNN_OK);
+            snn_test_cuda_set_fail_after(3); /* upload, integrate, propagate ok; spikes D2H fails */
+            ASSERT_EQ_INT(snn_cuda_step(dctx, in, sp), SNN_ERR_CUDA);
+            snn_test_cuda_disable_failure();
+            ASSERT_EQ_INT(snn_step_cpu(dnet, dcpu, NULL, NULL), SNN_OK);
+            ASSERT_EQ_INT(snn_cuda_step(dctx, NULL, NULL), SNN_OK);
+            ASSERT_EQ_INT(snn_state_copy_voltage(dcpu, cv, 1000), SNN_OK);
+            ASSERT_EQ_INT(snn_cuda_download_voltage(dctx, gv, 1000), SNN_OK);
+            ASSERT_TRUE(memcmp(cv, gv, 1000u * sizeof(float)) == 0);
+            snn_cuda_free(dctx);
+            snn_state_free(dcpu);
+            snn_network_free(dnet);
+            free(cv);
+            free(gv);
+        }
 
         /* Streaming step-time copy/launch failures inside stream_propagate. */
         {
