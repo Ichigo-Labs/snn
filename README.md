@@ -109,9 +109,10 @@ for (int i = 0; i < batch_size; ++i) {
 snn_bptt_optimizer_step(adam, net, grads, batch_size);
 ```
 
-### MNIST
+### MNIST and Kuzushiji-MNIST
 
-The dataset is committed under `data/mnist/` (the four original idx.gz files).
+Both datasets are committed (`data/mnist/`, `data/kmnist/` — the original idx.gz
+files), so the results below reproduce with no network access.
 
 ```bash
 cmake -S . -B build-tools -DSNN_BUILD_TOOLS=ON -DSNN_BUILD_TESTS=OFF
@@ -123,13 +124,24 @@ A 784-1000-10 network unrolled over 25 steps reaches **~97% test accuracy after
 one epoch** and **97.95% ± 0.18 after eight** (8 seeds), at a 5.4% hidden firing
 rate, in 10-13 s/epoch on 12 CPU cores.
 
-`atan` is the surrogate to reach for. On MNIST all four smooth surrogates are
-statistically tied on accuracy, so the choice is made by the two things that do
-separate: `atan` tolerates the widest range of `alpha` (0.27% accuracy lost
-across a 50x sweep, against 0.74% for `triangle`) and it is the sparsest, firing
-20.7% fewer spikes than `fast_sigmoid` at equal accuracy. See
-[docs/mnist_bptt.md](docs/mnist_bptt.md) for the full comparison, the `alpha`
-sweep, and the reset-path and unrolled-depth ablations.
+`atan` is the surrogate to reach for — it is the only one that never ranks worse
+than second on accuracy, `alpha` robustness or firing rate, on either MNIST or
+the harder Kuzushiji-MNIST. Accuracy alone cannot rank surrogates on either
+dataset: every pairwise difference sits inside the seed noise. What separates
+them is that compact-support kernels (`triangle`, `rectangular`) are fragile to
+the choice of `alpha`, carry ~5x the across-seed variance, and fire 8-28% more
+spikes at matched `alpha`.
+
+Beware transplanting `alpha`: its optimum does not transfer between datasets
+(`fast_sigmoid` wants 5 on MNIST and 1 on KMNIST). Sweep it.
+
+- [docs/mnist_bptt.md](docs/mnist_bptt.md) — the comparison, the `alpha` sweep,
+  and the reset-path and unrolled-depth ablations.
+- [docs/kmnist_bptt.md](docs/kmnist_bptt.md) — the same protocol on a dataset ten
+  points harder, which replicates the ranking and corrects one MNIST claim.
+
+Kuzushiji-MNIST is committed too (`data/kmnist/`, 20.3 MB) and is a drop-in:
+`--data data/kmnist`, no code change.
 
 ## Benchmarks
 

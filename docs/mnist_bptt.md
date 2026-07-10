@@ -6,17 +6,29 @@
 > gap under 0.07% and none significant). It wins on the two things that *are*
 > separable. It has the **widest usable `alpha` band** — across a 50x range of
 > gradient-window widths it never loses more than 0.27% accuracy, against 0.74%
-> for `triangle` — and at equal accuracy it is the **sparsest**, firing 20.7%
-> fewer spikes than `fast_sigmoid` (paired `t = 10.7` over 8 shared seeds).
+> for `triangle` — and its configuration is the **sparsest**, firing 20.7% fewer
+> spikes than `fast_sigmoid`'s (paired `t = 10.7` over 8 shared seeds).
 >
 > A 784-1000-10 network unrolled over 25 steps reaches ~97% test accuracy after
 > one epoch and **97.95% ± 0.18** after eight, at a 5.4% hidden firing rate, in
-> about 10 s/epoch on 12 CPU cores. The single best run of any configuration was
+> 10–13 s/epoch on 12 CPU cores. The single best run of any configuration was
 > 98.24%.
 >
 > The uncomfortable finding is that **accuracy alone cannot rank surrogates on
 > MNIST**, and neither can MNIST rank them on their temporal behaviour: a `T=1`
 > unroll — no recurrence at all — already scores 97.48%.
+
+> **Follow-up, and one correction.** The natural objection to the paragraph above
+> is that MNIST is simply too easy to see a difference. That objection is tested
+> in [`kmnist_bptt.md`](kmnist_bptt.md), on a dataset ten points harder. Accuracy
+> still fails to discriminate — but the follow-up **corrects the sparsity claim
+> made here**. The 20.7% figure is an `alpha` artifact, not a property of the
+> `atan` shape: at *matched* `alpha` the two surrogates fire indistinguishably
+> (`t = -0.85`). The gap exists only because `fast_sigmoid`'s best `alpha` on
+> MNIST is 5 and `atan`'s is 2, and a narrower window pushes more neurons across
+> threshold. What *is* a genuine shape effect is that compact-support kernels
+> fire 8–28% more than smooth ones at every matched `alpha`. The recommendation
+> of `atan` stands; the reason given for it here was half wrong.
 
 ## What is being trained
 
@@ -163,10 +175,20 @@ convergence speed a discriminator — after one epoch the six are spread across
 0.26 points, and the ordering there does not match the ordering at eight epochs.
 
 The firing rate does discriminate, sharply and reproducibly. At statistically
-identical accuracy `atan` emits **20.7% fewer spikes** than `fast_sigmoid`
-(0.0544 ± 0.0027 against 0.0656 ± 0.0022; paired `t = 10.7` over the 8 shared
-seeds, df = 7). On a neuromorphic target that is the number that matters, and it
-is the number with the largest effect size in this entire document.
+identical accuracy `atan`'s configuration emits **20.7% fewer spikes** than
+`fast_sigmoid`'s (0.0544 ± 0.0027 against 0.0656 ± 0.0022; paired `t = 10.7` over
+the 8 shared seeds, df = 7). On a neuromorphic target that is the number that
+matters, and it is the number with the largest effect size in this document.
+
+Two caveats, both established in [`kmnist_bptt.md`](kmnist_bptt.md) and neither
+visible from MNIST alone. First, this is a comparison of *configurations*, not of
+shapes: each surrogate runs at its own best `alpha`, and at matched `alpha` the
+`atan`-versus-`fast_sigmoid` firing gap disappears entirely (`t = -0.85`). What
+drives firing is the width of the gradient window, which `fast_sigmoid` happens
+to want narrower here. Second, there *is* a real shape effect on sparsity, but it
+is the smooth-versus-compact split rather than anything within the smooth group:
+`triangle` and `rectangular` fire 8–28% more than the smooth kernels at every
+matched `alpha` (pooled `t = 9.6`).
 
 Wall-clock per epoch is not reported per surrogate. Repeated timings on this
 machine reorder the six — `atan` measured 10.0 s/epoch in one batch and 13.0 in
@@ -226,7 +248,7 @@ more of them across it. If spike sparsity is the objective — and on
 neuromorphic hardware it is the objective — a *wide* window is 45% cheaper at
 equal accuracy.
 
-### The reset path is worth ~0.3%
+### The reset path is worth ~0.2%, and costs sparsity
 
 The gradient of a spike with respect to its own future membrane potential — the
 `-threshold*s[j][t-1]` term — is the piece most often dropped, because
@@ -241,11 +263,19 @@ detaching it is cheaper and simpler. It is not free to drop it.
 | `gaussian` | backpropagated | 97.64% ±0.09 | 0.139 |
 | `gaussian` | detached | 97.39% ±0.38 | 0.143 |
 
-Detaching costs about 0.3 points for both surrogates tested and *raises* the
-firing rate. This is also the sharpest unit test in the suite: with the
-soft-spike hook enabled, the attached gradient matches central differences to
-better than `1e-3`, while the detached one is off by more than twenty times
-that — the path is real, and it is not cancelling itself out.
+Detaching costs 0.25–0.32 points for both surrogates tested and *raises* the
+firing rate. Those are point estimates from three seeds apiece, and neither cell
+clears significance on its own; pooling all twelve paired runs across this
+dataset and KMNIST gives **+0.233%, `t = 2.43` (df=11)** for accuracy, and a far
+more robust **+0.0106 firing rate, `t = 5.62`, positive in 12 runs out of 12**.
+Cutting the gradient through a spike's own reset costs a little accuracy and
+reliably buys extra spikes you did not want.
+
+That the path carries real gradient is not in question either way. It is the
+sharpest unit test in the suite: with the soft-spike hook enabled, the attached
+gradient matches central differences to better than `1e-3`, while the detached
+one is off by more than twenty times that — the path is real, and it is not
+cancelling itself out.
 
 ### Unrolled depth buys almost nothing on MNIST
 
