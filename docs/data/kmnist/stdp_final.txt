@@ -1,0 +1,26 @@
+kmnist_stdp: 60000 train, 10000 test, device=cuda:0 (NVIDIA GeForce RTX 4060 Ti), torch=2.11.0+cu128
+raw-pixel ridge control: train 76.97%  test 59.84%
+seed=1 architecture=784-256-256-256-256-10 T=20 batch=128 stdp_lr=0.005 effective_lr=0.0004166667
+  untrained readout test: L1 59.76%  L2 55.59%  L3 51.90%  L4 47.16%  concat 66.51%   [pixels 59.84%]
+  STDP epoch 1: L1 0.1238  L2 0.1212  L3 0.1181  L4 0.1146  20.0s
+  STDP epoch 2: L1 0.1248  L2 0.1229  L3 0.1201  L4 0.1173  19.6s
+  STDP epoch 3: L1 0.1249  L2 0.1235  L3 0.1219  L4 0.1203  19.6s
+  trained readout test:   L1 67.44%  L2 66.03%  L3 64.82%  L4 61.81%  concat 74.13%   STDP 59.2s  features 5.0s
+seed=2 architecture=784-256-256-256-256-10 T=20 batch=128 stdp_lr=0.005 effective_lr=0.0004166667
+  untrained readout test: L1 61.04%  L2 57.00%  L3 53.00%  L4 48.66%  concat 67.04%   [pixels 59.84%]
+  STDP epoch 1: L1 0.1238  L2 0.1213  L3 0.1183  L4 0.1148  19.8s
+  STDP epoch 2: L1 0.1248  L2 0.1230  L3 0.1205  L4 0.1177  19.7s
+  STDP epoch 3: L1 0.1249  L2 0.1236  L3 0.1222  L4 0.1210  19.8s
+  trained readout test:   L1 66.73%  L2 64.90%  L3 63.47%  L4 61.15%  concat 73.26%   STDP 59.2s  features 5.0s
+seed=3 architecture=784-256-256-256-256-10 T=20 batch=128 stdp_lr=0.005 effective_lr=0.0004166667
+  untrained readout test: L1 61.50%  L2 56.70%  L3 53.19%  L4 47.91%  concat 67.82%   [pixels 59.84%]
+  STDP epoch 1: L1 0.1239  L2 0.1215  L3 0.1185  L4 0.1150  19.8s
+  STDP epoch 2: L1 0.1248  L2 0.1230  L3 0.1203  L4 0.1175  19.8s
+  STDP epoch 3: L1 0.1249  L2 0.1235  L3 0.1218  L4 0.1203  19.7s
+  trained readout test:   L1 67.47%  L2 66.28%  L3 64.96%  L4 63.28%  concat 74.44%   STDP 59.4s  features 4.9s
+seed=4 architecture=784-256-256-256-256-10 T=20 batch=128 stdp_lr=0.005 effective_lr=0.0004166667
+  untrained readout test: L1 60.23%  L2 55.80%  L3 51.42%  L4 47.30%  concat 66.59%   [pixels 59.84%]
+  STDP epoch 1: L1 0.1236  L2 0.1212  L3 0.1182  L4 0.1148  19.8s
+  STDP epoch 2: L1 0.1248  L2 0.1230  L3 0.1206  L4 0.1181  19.9s
+  STDP epoch 3: L1 0.1249  L2 0.1236  L3 0.1223  L4 0.1211  19.9s
+  trained readout test:   L1 67.04%  L2 65.54%  L3 63.76%  L4 60.83%  concat 72.63%   STDP 59.6s  features 5.0s

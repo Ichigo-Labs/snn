@@ -1,0 +1,4 @@
+kmnist_stdp self-test: device=cuda:0 (NVIDIA GeForce RTX 4060 Ti)
+  causal LTP, anti-causal LTD, quiet rule: pass
+  CPU/CUDA correlation parity: pass
+  four-layer CUDA update, normalization, frozen evaluation: pass
