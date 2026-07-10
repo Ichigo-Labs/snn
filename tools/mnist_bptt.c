@@ -38,8 +38,18 @@
 #include <omp.h>
 #endif
 
+#include "bptt_cuda.h"
+
+#ifdef SNN_ENABLE_TEST_HOOKS
+/* Library test hook (no public header): soft spikes make the model smooth so
+ * the gputest gradient comparison cannot be tripped by a spike flipping on a
+ * last-bit membrane difference between the CPU and GPU implementations. */
+void snn_test_bptt_set_soft_spikes(snn_bptt_network_t *network, int enable);
+#endif
+
 #define MNIST_PIXELS 784u
 #define MNIST_CLASSES 10u
+#define MAX_HIDDEN_LAYERS 8u
 
 typedef struct {
     uint8_t *pixels; /* count * 784 */
@@ -52,11 +62,13 @@ typedef struct {
     const char *mode;
     const char *csv_path;
     const char *tag;
-    snn_size_t hidden;
+    snn_size_t hidden[MAX_HIDDEN_LAYERS];
+    size_t hidden_count;
     snn_size_t timesteps;
     int epochs;
     snn_size_t train_limit;
     snn_size_t test_limit;
+    snn_size_t train_eval; /* post-epoch train-set eval on this many samples, 0 = off */
     snn_size_t batch;
     float lr;
     float beta;
@@ -67,6 +79,7 @@ typedef struct {
     int detach_reset;
     int seeds;
     int threads;
+    int gpu;
     uint64_t seed0;
 } options_t;
 
@@ -353,23 +366,35 @@ static run_result_t train_one(const options_t *opt,
                               FILE *csv,
                               const char *tag,
                               int verbose) {
-    snn_size_t layers[3];
+    snn_size_t layers[MAX_HIDDEN_LAYERS + 2u];
     snn_bptt_config_t cfg;
     snn_bptt_network_t *net = NULL;
     snn_bptt_optimizer_t *adam = NULL;
+    bptt_gpu_t *gpu = NULL;
     pool_t pool;
     snn_size_t *order = NULL;
     snn_size_t i = 0;
+    size_t h = 0;
     uint64_t rng = seed ^ UINT64_C(0x9e3779b97f4a7c15);
     run_result_t result;
     int epoch = 0;
-    const double hidden_steps = (double)opt->hidden * (double)opt->timesteps;
+    double hidden_steps = 0.0;
+    /* The train-eval set is a fixed prefix of the (unshuffled) training set,
+     * scored after the epoch's last update like the test set is, so the two
+     * losses are the same measurement on the same frozen model. */
+    mnist_set_t train_eval = *train;
+    if (opt->train_eval != 0u && opt->train_eval < train_eval.count) {
+        train_eval.count = opt->train_eval;
+    }
 
     memset(&result, 0, sizeof(result));
     layers[0] = MNIST_PIXELS;
-    layers[1] = opt->hidden;
-    layers[2] = MNIST_CLASSES;
-    cfg = snn_bptt_default_config(layers, 3, opt->timesteps);
+    for (h = 0; h < opt->hidden_count; ++h) {
+        layers[h + 1u] = opt->hidden[h];
+        hidden_steps += (double)opt->hidden[h] * (double)opt->timesteps;
+    }
+    layers[opt->hidden_count + 1u] = MNIST_CLASSES;
+    cfg = snn_bptt_default_config(layers, opt->hidden_count + 2u, opt->timesteps);
     cfg.beta = opt->beta;
     cfg.threshold = opt->threshold;
     cfg.surrogate = surrogate;
@@ -380,10 +405,29 @@ static run_result_t train_one(const options_t *opt,
     if (snn_bptt_network_create(&cfg, &net) != SNN_OK) {
         die("network create failed");
     }
-    if (snn_bptt_optimizer_create(net, opt->lr, 0.9f, 0.999f, 1e-8f, &adam) != SNN_OK) {
-        die("optimizer create failed");
+    if (opt->gpu) {
+        /* The library still creates the network so initialization is the
+         * identical Kaiming-uniform draw; only the flat vector moves over. */
+        const snn_size_t pc = snn_bptt_parameter_count(net);
+        float *p0 = (float *)malloc((size_t)pc * sizeof(float));
+        char errbuf[256];
+        if (p0 == NULL || snn_bptt_get_parameters(net, p0, pc) != SNN_OK) {
+            die("parameter export failed");
+        }
+        gpu = bptt_gpu_create(layers, opt->hidden_count + 2u, opt->timesteps, cfg.beta, cfg.threshold, surrogate,
+                              alpha, opt->detach_reset, p0, pc, train->pixels, train->labels, train->count,
+                              test->pixels, test->labels, test->count, opt->batch, 1000u, opt->lr, 0.9f, 0.999f,
+                              1e-8f, errbuf, sizeof(errbuf));
+        free(p0);
+        if (gpu == NULL) {
+            die(errbuf);
+        }
+    } else {
+        if (snn_bptt_optimizer_create(net, opt->lr, 0.9f, 0.999f, 1e-8f, &adam) != SNN_OK) {
+            die("optimizer create failed");
+        }
+        pool_create(&pool, net, opt->threads);
     }
-    pool_create(&pool, net, opt->threads);
 
     order = (snn_size_t *)malloc((size_t)train->count * sizeof(*order));
     if (order == NULL) {
@@ -398,13 +442,36 @@ static run_result_t train_one(const options_t *opt,
         float train_loss = 0.0f;
         float acc = 0.0f;
         float loss = 0.0f;
+        float train_eval_loss = (float)NAN;
+        float train_eval_acc = (float)NAN;
         double spikes = 0.0;
         double elapsed = 0.0;
 
         shuffle(order, train->count, &rng);
-        train_loss = train_epoch(net, adam, &pool, train, order, opt->batch);
-        elapsed = now_seconds() - t0;
-        evaluate(net, &pool, test, &acc, &loss, &spikes);
+        if (gpu != NULL) {
+            if (bptt_gpu_train_epoch(gpu, order, train->count, &train_loss) != 0) {
+                die(bptt_gpu_last_error(gpu));
+            }
+            elapsed = now_seconds() - t0;
+            if (bptt_gpu_evaluate(gpu, 1, 0u, &acc, &loss, &spikes) != 0) {
+                die(bptt_gpu_last_error(gpu));
+            }
+            if (opt->train_eval != 0u) {
+                double eval_spikes = 0.0;
+                if (bptt_gpu_evaluate(gpu, 0, opt->train_eval, &train_eval_acc, &train_eval_loss, &eval_spikes) !=
+                    0) {
+                    die(bptt_gpu_last_error(gpu));
+                }
+            }
+        } else {
+            train_loss = train_epoch(net, adam, &pool, train, order, opt->batch);
+            elapsed = now_seconds() - t0;
+            evaluate(net, &pool, test, &acc, &loss, &spikes);
+            if (opt->train_eval != 0u) {
+                double eval_spikes = 0.0;
+                evaluate(net, &pool, &train_eval, &train_eval_acc, &train_eval_loss, &eval_spikes);
+            }
+        }
 
         result.final_accuracy = acc;
         result.final_loss = loss;
@@ -417,28 +484,319 @@ static run_result_t train_one(const options_t *opt,
             result.epoch1_accuracy = acc;
         }
         if (verbose) {
-            printf("  epoch %2d  train_loss %.4f  test_loss %.4f  test_acc %6.2f%%  firing %.3f  %.1fs\n", epoch,
+            printf("  epoch %2d  train_loss %.4f  test_loss %.4f  test_acc %6.2f%%  firing %.3f  %.1fs", epoch,
                    (double)train_loss, (double)loss, 100.0 * (double)acc, spikes / hidden_steps, elapsed);
+            if (opt->train_eval != 0u) {
+                printf("  eval_loss %.4f  eval_acc %6.2f%%", (double)train_eval_loss, 100.0 * (double)train_eval_acc);
+            }
+            printf("\n");
             fflush(stdout);
         }
         if (csv != NULL) {
-            fprintf(csv, "%s,%s,%g,%llu,%d,%.6f,%.6f,%.6f,%.6f,%.3f\n", tag, snn_surrogate_string(surrogate),
+            fprintf(csv, "%s,%s,%g,%llu,%d,%.6f,%.6f,%.6f,%.6f,%.3f,%.6f,%.6f\n", tag, snn_surrogate_string(surrogate),
                     (double)alpha, (unsigned long long)seed, epoch, (double)train_loss, (double)loss, (double)acc,
-                    spikes / hidden_steps, elapsed);
+                    spikes / hidden_steps, elapsed, (double)train_eval_loss, (double)train_eval_acc);
             fflush(csv);
         }
     }
 
     free(order);
-    pool_free(&pool);
-    snn_bptt_optimizer_free(adam);
+    if (gpu != NULL) {
+        bptt_gpu_destroy(gpu);
+    } else {
+        pool_free(&pool);
+        snn_bptt_optimizer_free(adam);
+    }
     snn_bptt_network_free(net);
     return result;
 }
 
 /* ------------------------------------------------------------------ */
+/* GPU verification (--mode gputest)                                   */
+/* ------------------------------------------------------------------ */
+
+/*
+ * Two-part battery for the CUDA backend, run on real dataset samples.
+ *
+ * Part 1 compares batch-summed gradients against the library under the
+ * soft-spike test hook. With S(U - threshold) in place of the Heaviside the
+ * unrolled model is smooth, so the two implementations can only differ by
+ * float summation order -- a strict tolerance holds, and no tolerance has to
+ * absorb a spike flipping on a last-bit membrane difference. A wrong index,
+ * transpose, reset path or detach branch fails loudly.
+ *
+ * Part 2 trains with hard spikes for two epochs from an identical
+ * initialization and shuffle order, then requires the CPU and GPU
+ * trajectories to land together within loose bounds. This exercises the one
+ * code path soft spikes cannot: the discrete spike itself.
+ */
+
+#ifdef SNN_ENABLE_TEST_HOOKS
+typedef struct {
+    const char *name;
+    snn_size_t hidden[3];
+    size_t hidden_count;
+    snn_size_t timesteps;
+    snn_surrogate_t surrogate;
+    float alpha;
+    int detach;
+} gputest_case_t;
+
+static double rel_l2(const float *a, const float *b, snn_size_t n) {
+    double diff = 0.0;
+    double ref = 0.0;
+    snn_size_t i = 0;
+    for (i = 0; i < n; ++i) {
+        const double d = (double)a[i] - (double)b[i];
+        diff += d * d;
+        ref += (double)a[i] * (double)a[i];
+    }
+    return sqrt(diff) / (sqrt(ref) + 1e-30);
+}
+#endif /* SNN_ENABLE_TEST_HOOKS */
+
+static int run_gputest(const options_t *opt, const mnist_set_t *train, const mnist_set_t *test) {
+#ifndef SNN_ENABLE_TEST_HOOKS
+    (void)opt;
+    (void)train;
+    (void)test;
+    die("gputest needs the soft-spike hook: configure with -DSNN_BUILD_TESTS=ON");
+    return 1;
+#else
+    static const gputest_case_t cases[] = {
+        {"d1 atan T7", {40, 0, 0}, 1, 7, SNN_SURROGATE_ATAN, 1.0f, 0},
+        {"d1 gaussian T1", {40, 0, 0}, 1, 1, SNN_SURROGATE_GAUSSIAN, 1.0f, 0},
+        {"d2 atan T7", {32, 24, 0}, 2, 7, SNN_SURROGATE_ATAN, 1.0f, 0},
+        {"d2 atan T7 detach", {32, 24, 0}, 2, 7, SNN_SURROGATE_ATAN, 1.0f, 1},
+        {"d2 sigmoid T7", {32, 24, 0}, 2, 7, SNN_SURROGATE_SIGMOID, 1.0f, 0},
+        {"d2 triangle T7", {32, 24, 0}, 2, 7, SNN_SURROGATE_TRIANGLE, 0.5f, 0},
+        {"d2 rectangular T7", {32, 24, 0}, 2, 7, SNN_SURROGATE_RECTANGULAR, 0.5f, 0},
+        {"d3 fast_sigmoid T5", {24, 16, 16}, 3, 5, SNN_SURROGATE_FAST_SIGMOID, 2.0f, 0},
+    };
+    const snn_size_t GRAD_BATCH = 64;
+    const snn_size_t SUBSET = 256; /* uploaded slice of the training set */
+    int failures = 0;
+    size_t c = 0;
+
+    if (!bptt_gpu_available()) {
+        die("gputest: no CUDA device");
+    }
+    printf("gradient parity, CPU library vs GPU backend, soft spikes, batch of %llu real samples\n",
+           (unsigned long long)GRAD_BATCH);
+    printf("%-22s %14s %14s  %s\n", "case", "grad rel L2", "loss rel", "verdict");
+
+    for (c = 0; c < sizeof(cases) / sizeof(cases[0]); ++c) {
+        const gputest_case_t *tc = &cases[c];
+        snn_size_t layers[5];
+        snn_bptt_config_t cfg;
+        snn_bptt_network_t *net = NULL;
+        snn_bptt_workspace_t *ws = NULL;
+        snn_bptt_grads_t *grads = NULL;
+        bptt_gpu_t *gpu = NULL;
+        char errbuf[256];
+        float *cpu_g = NULL;
+        float *gpu_g = NULL;
+        float *p0 = NULL;
+        float *frame = NULL;
+        snn_size_t *indices = NULL;
+        snn_size_t pc = 0;
+        double cpu_loss = 0.0;
+        float gpu_loss = 0.0f;
+        double g_err = 0.0;
+        double l_err = 0.0;
+        int ok = 0;
+        snn_size_t i = 0;
+        size_t h = 0;
+
+        layers[0] = MNIST_PIXELS;
+        for (h = 0; h < tc->hidden_count; ++h) {
+            layers[h + 1u] = tc->hidden[h];
+        }
+        layers[tc->hidden_count + 1u] = MNIST_CLASSES;
+        cfg = snn_bptt_default_config(layers, tc->hidden_count + 2u, tc->timesteps);
+        cfg.surrogate = tc->surrogate;
+        cfg.surrogate_alpha = tc->alpha;
+        cfg.detach_reset = tc->detach;
+        cfg.weight_init_gain = 0.577f;
+        cfg.seed = 1000u + (uint64_t)c;
+        if (snn_bptt_network_create(&cfg, &net) != SNN_OK || snn_bptt_workspace_create(net, &ws) != SNN_OK ||
+            snn_bptt_grads_create(net, &grads) != SNN_OK) {
+            die("gputest: cpu setup failed");
+        }
+        snn_test_bptt_set_soft_spikes(net, 1);
+        pc = snn_bptt_parameter_count(net);
+        cpu_g = (float *)malloc((size_t)pc * sizeof(float));
+        gpu_g = (float *)malloc((size_t)pc * sizeof(float));
+        p0 = (float *)malloc((size_t)pc * sizeof(float));
+        frame = (float *)malloc(MNIST_PIXELS * sizeof(float));
+        indices = (snn_size_t *)malloc((size_t)GRAD_BATCH * sizeof(snn_size_t));
+        if (cpu_g == NULL || gpu_g == NULL || p0 == NULL || frame == NULL || indices == NULL) {
+            die("gputest: out of memory");
+        }
+
+        for (i = 0; i < GRAD_BATCH; ++i) {
+            float loss = 0.0f;
+            indices[i] = i;
+            encode(train, i, frame);
+            if (snn_bptt_forward_backward(net, ws, frame, 1, train->labels[i], grads, &loss, NULL) != SNN_OK) {
+                die("gputest: cpu forward_backward failed");
+            }
+            cpu_loss += (double)loss;
+        }
+        if (snn_bptt_grads_copy_out(grads, cpu_g, pc) != SNN_OK ||
+            snn_bptt_get_parameters(net, p0, pc) != SNN_OK) {
+            die("gputest: cpu export failed");
+        }
+
+        gpu = bptt_gpu_create(layers, tc->hidden_count + 2u, tc->timesteps, cfg.beta, cfg.threshold, tc->surrogate,
+                              tc->alpha, tc->detach, p0, pc, train->pixels, train->labels, SUBSET, test->pixels,
+                              test->labels, SUBSET, GRAD_BATCH, GRAD_BATCH, 1e-3f, 0.9f, 0.999f, 1e-8f, errbuf,
+                              sizeof(errbuf));
+        if (gpu == NULL) {
+            die(errbuf);
+        }
+        bptt_gpu_set_soft_spikes(gpu, 1);
+        if (bptt_gpu_batch_grads(gpu, indices, GRAD_BATCH, gpu_g, &gpu_loss) != 0) {
+            die(bptt_gpu_last_error(gpu));
+        }
+
+        g_err = rel_l2(cpu_g, gpu_g, pc);
+        l_err = fabs(cpu_loss - (double)gpu_loss) / (fabs(cpu_loss) + 1e-30);
+        ok = g_err < 5e-4 && l_err < 1e-4;
+        failures += !ok;
+        printf("%-22s %14.3e %14.3e  %s\n", tc->name, g_err, l_err, ok ? "pass" : "FAIL");
+
+        bptt_gpu_destroy(gpu);
+        free(indices);
+        free(frame);
+        free(p0);
+        free(gpu_g);
+        free(cpu_g);
+        snn_bptt_grads_free(grads);
+        snn_bptt_workspace_free(ws);
+        snn_bptt_network_free(net);
+    }
+
+    /* Part 2: hard spikes, identical init and shuffle, two epochs. */
+    {
+        snn_size_t layers[4] = {MNIST_PIXELS, 32, 24, MNIST_CLASSES};
+        snn_bptt_config_t cfg = snn_bptt_default_config(layers, 4, 7);
+        snn_bptt_network_t *net = NULL;
+        snn_bptt_optimizer_t *adam = NULL;
+        bptt_gpu_t *gpu = NULL;
+        pool_t pool;
+        char errbuf[256];
+        mnist_set_t train2 = *train;
+        mnist_set_t test2 = *test;
+        snn_size_t *order = NULL;
+        uint64_t rng = 42u ^ UINT64_C(0x9e3779b97f4a7c15);
+        uint64_t rng_gpu = rng;
+        float cpu_train_loss = 0.0f;
+        float gpu_train_loss = 0.0f;
+        float cpu_acc = 0.0f;
+        float gpu_acc = 0.0f;
+        float l = 0.0f;
+        double sp = 0.0;
+        float *p0 = NULL;
+        snn_size_t pc = 0;
+        snn_size_t i = 0;
+        int e = 0;
+        int ok = 0;
+
+        train2.count = train2.count < 2000u ? train2.count : 2000u;
+        test2.count = test2.count < 1000u ? test2.count : 1000u;
+        cfg.surrogate = SNN_SURROGATE_ATAN;
+        cfg.surrogate_alpha = 1.0f;
+        cfg.weight_init_gain = 0.577f;
+        cfg.seed = 42u;
+        if (snn_bptt_network_create(&cfg, &net) != SNN_OK ||
+            snn_bptt_optimizer_create(net, 1e-3f, 0.9f, 0.999f, 1e-8f, &adam) != SNN_OK) {
+            die("gputest: trajectory cpu setup failed");
+        }
+        pc = snn_bptt_parameter_count(net);
+        p0 = (float *)malloc((size_t)pc * sizeof(float));
+        order = (snn_size_t *)malloc((size_t)train2.count * sizeof(*order));
+        if (p0 == NULL || order == NULL || snn_bptt_get_parameters(net, p0, pc) != SNN_OK) {
+            die("gputest: trajectory export failed");
+        }
+        pool_create(&pool, net, opt->threads);
+        for (i = 0; i < train2.count; ++i) {
+            order[i] = i;
+        }
+        for (e = 0; e < 2; ++e) {
+            shuffle(order, train2.count, &rng);
+            cpu_train_loss = train_epoch(net, adam, &pool, &train2, order, 128u);
+        }
+        evaluate(net, &pool, &test2, &cpu_acc, &l, &sp);
+
+        gpu = bptt_gpu_create(layers, 4, 7, cfg.beta, cfg.threshold, SNN_SURROGATE_ATAN, 1.0f, 0, p0, pc,
+                              train->pixels, train->labels, train2.count, test->pixels, test->labels, test2.count,
+                              128u, 500u, 1e-3f, 0.9f, 0.999f, 1e-8f, errbuf, sizeof(errbuf));
+        if (gpu == NULL) {
+            die(errbuf);
+        }
+        for (i = 0; i < train2.count; ++i) {
+            order[i] = i;
+        }
+        for (e = 0; e < 2; ++e) {
+            shuffle(order, train2.count, &rng_gpu);
+            if (bptt_gpu_train_epoch(gpu, order, train2.count, &gpu_train_loss) != 0) {
+                die(bptt_gpu_last_error(gpu));
+            }
+        }
+        if (bptt_gpu_evaluate(gpu, 1, 0u, &gpu_acc, &l, &sp) != 0) {
+            die(bptt_gpu_last_error(gpu));
+        }
+
+        ok = fabs((double)cpu_acc - (double)gpu_acc) <= 0.02 &&
+             fabs((double)cpu_train_loss - (double)gpu_train_loss) / ((double)cpu_train_loss + 1e-30) <= 0.05;
+        failures += !ok;
+        printf("\nhard-spike trajectory, 784-32-24-10 T=7, 2 epochs on %llu samples, shared init and order\n",
+               (unsigned long long)train2.count);
+        printf("  train_loss  cpu %.4f  gpu %.4f\n", (double)cpu_train_loss, (double)gpu_train_loss);
+        printf("  test_acc    cpu %.2f%%  gpu %.2f%%  %s\n", 100.0 * (double)cpu_acc, 100.0 * (double)gpu_acc,
+               ok ? "pass" : "FAIL");
+
+        bptt_gpu_destroy(gpu);
+        free(order);
+        free(p0);
+        pool_free(&pool);
+        snn_bptt_optimizer_free(adam);
+        snn_bptt_network_free(net);
+    }
+
+    printf("\ngputest: %s\n", failures == 0 ? "all comparisons passed" : "FAILURES");
+    return failures != 0;
+#endif
+}
+
+/* ------------------------------------------------------------------ */
 /* CLI                                                                 */
 /* ------------------------------------------------------------------ */
+
+/* "256" or "256,256,128": one width per hidden layer, at most MAX_HIDDEN_LAYERS. */
+static void parse_hidden(const char *arg, options_t *opt) {
+    const char *p = arg;
+    opt->hidden_count = 0;
+    for (;;) {
+        char *end = NULL;
+        const unsigned long long v = strtoull(p, &end, 10);
+        if (end == p || v == 0ull) {
+            die("bad --hidden list");
+        }
+        if (opt->hidden_count == MAX_HIDDEN_LAYERS) {
+            die("too many hidden layers");
+        }
+        opt->hidden[opt->hidden_count++] = (snn_size_t)v;
+        if (*end == '\0') {
+            return;
+        }
+        if (*end != ',') {
+            die("bad --hidden list");
+        }
+        p = end + 1;
+    }
+}
 
 static snn_surrogate_t parse_surrogate(const char *name) {
     int i = 0;
@@ -454,12 +812,14 @@ static snn_surrogate_t parse_surrogate(const char *name) {
 static void usage(void) {
     printf("usage: mnist_bptt [options]\n"
            "  --data DIR         directory holding the four MNIST .gz files (default data/mnist)\n"
-           "  --mode M           single | sweep | final    (default single)\n"
-           "  --hidden N         hidden layer width (default 256)\n"
+           "  --mode M           single | sweep | final | gputest    (default single)\n"
+           "  --gpu              train on the CUDA backend (tool-level; see tools/bptt_cuda.h)\n"
+           "  --hidden N[,N...]  hidden layer widths, comma-separated (default 256)\n"
            "  --timesteps T      unrolled steps (default 20)\n"
            "  --epochs E         epochs per run (default 3)\n"
            "  --train N          cap on training images, 0 = all (default 0)\n"
            "  --test N           cap on test images, 0 = all (default 0)\n"
+           "  --train-eval N     also score the first N train images after each epoch (default 0 = off)\n"
            "  --batch B          minibatch size (default 128)\n"
            "  --lr LR            Adam learning rate (default 2e-3)\n"
            "  --beta B           membrane decay (default 0.95)\n"
@@ -486,7 +846,8 @@ int main(int argc, char **argv) {
     opt.data_dir = "data/mnist";
     opt.mode = "single";
     opt.tag = NULL;
-    opt.hidden = 256;
+    opt.hidden[0] = 256;
+    opt.hidden_count = 1;
     opt.timesteps = 20;
     opt.epochs = 3;
     opt.batch = 128;
@@ -512,7 +873,7 @@ int main(int argc, char **argv) {
         } else if (strcmp(a, "--mode") == 0) {
             opt.mode = NEXT();
         } else if (strcmp(a, "--hidden") == 0) {
-            opt.hidden = strtoull(NEXT(), NULL, 10);
+            parse_hidden(NEXT(), &opt);
         } else if (strcmp(a, "--timesteps") == 0) {
             opt.timesteps = strtoull(NEXT(), NULL, 10);
         } else if (strcmp(a, "--epochs") == 0) {
@@ -521,6 +882,8 @@ int main(int argc, char **argv) {
             opt.train_limit = strtoull(NEXT(), NULL, 10);
         } else if (strcmp(a, "--test") == 0) {
             opt.test_limit = strtoull(NEXT(), NULL, 10);
+        } else if (strcmp(a, "--train-eval") == 0) {
+            opt.train_eval = strtoull(NEXT(), NULL, 10);
         } else if (strcmp(a, "--batch") == 0) {
             opt.batch = strtoull(NEXT(), NULL, 10);
         } else if (strcmp(a, "--lr") == 0) {
@@ -537,6 +900,8 @@ int main(int argc, char **argv) {
             opt.surrogate = parse_surrogate(NEXT());
         } else if (strcmp(a, "--detach") == 0) {
             opt.detach_reset = 1;
+        } else if (strcmp(a, "--gpu") == 0) {
+            opt.gpu = 1;
         } else if (strcmp(a, "--seeds") == 0) {
             opt.seeds = atoi(NEXT());
         } else if (strcmp(a, "--threads") == 0) {
@@ -587,16 +952,37 @@ int main(int argc, char **argv) {
             die("cannot open csv");
         }
         if (fresh) {
-            fprintf(csv, "tag,surrogate,alpha,seed,epoch,train_loss,test_loss,test_acc,firing_rate,seconds\n");
+            fprintf(csv, "tag,surrogate,alpha,seed,epoch,train_loss,test_loss,test_acc,firing_rate,seconds,"
+                         "train_eval_loss,train_eval_acc\n");
         }
     }
 
-    printf("mnist_bptt: %llu train, %llu test, 784-%llu-10, T=%llu, beta=%g, thr=%g, gain=%g, lr=%g, batch=%llu, "
-           "threads=%d, detach_reset=%d\n",
-           (unsigned long long)train.count, (unsigned long long)test.count, (unsigned long long)opt.hidden,
-           (unsigned long long)opt.timesteps, (double)opt.beta, (double)opt.threshold, (double)opt.gain,
-           (double)opt.lr, (unsigned long long)opt.batch, opt.threads, opt.detach_reset);
+    {
+        char arch[128];
+        size_t off = (size_t)snprintf(arch, sizeof(arch), "784");
+        size_t h = 0;
+        for (h = 0; h < opt.hidden_count && off < sizeof(arch); ++h) {
+            off += (size_t)snprintf(arch + off, sizeof(arch) - off, "-%llu", (unsigned long long)opt.hidden[h]);
+        }
+        if (off < sizeof(arch)) {
+            snprintf(arch + off, sizeof(arch) - off, "-10");
+        }
+        printf("mnist_bptt: %llu train, %llu test, %s, T=%llu, beta=%g, thr=%g, gain=%g, lr=%g, batch=%llu, "
+               "threads=%d, detach_reset=%d\n",
+               (unsigned long long)train.count, (unsigned long long)test.count, arch,
+               (unsigned long long)opt.timesteps, (double)opt.beta, (double)opt.threshold, (double)opt.gain,
+               (double)opt.lr, (unsigned long long)opt.batch, opt.threads, opt.detach_reset);
+    }
 
+    if (strcmp(opt.mode, "gputest") == 0) {
+        const int rc = run_gputest(&opt, &train, &test);
+        mnist_free(&train);
+        mnist_free(&test);
+        if (csv != NULL) {
+            fclose(csv);
+        }
+        return rc;
+    }
     if (strcmp(opt.mode, "single") == 0) {
         int s = 0;
         for (s = 0; s < opt.seeds; ++s) {

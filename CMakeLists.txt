@@ -121,7 +121,21 @@ endif()
 if(SNN_BUILD_TOOLS)
     # The trainer reads the committed MNIST idx.gz files directly.
     find_package(ZLIB REQUIRED)
-    add_executable(mnist_bptt tools/mnist_bptt.c)
+    if(SNN_ENABLE_CUDA AND CMAKE_CUDA_COMPILER)
+        # The GPU training backend is a tool convenience, not a library
+        # feature: unlike snn_cuda_obj it compiles with fmad ON, because the
+        # tool's --mode gputest verifies it against the CPU trainer to float
+        # tolerance rather than bitwise. sm_60 is the floor for the double
+        # atomicAdd it uses; newer devices JIT the PTX forward.
+        add_executable(mnist_bptt tools/mnist_bptt.c tools/bptt_cuda.cu)
+        set_target_properties(mnist_bptt PROPERTIES CUDA_STANDARD 14 CUDA_STANDARD_REQUIRED ON
+                              CUDA_ARCHITECTURES 60 CUDA_SEPARABLE_COMPILATION OFF)
+        target_compile_options(mnist_bptt PRIVATE
+                               $<$<COMPILE_LANGUAGE:CUDA>:-O3 --compiler-options=-Wall,-Wextra>)
+        target_link_libraries(mnist_bptt PRIVATE CUDA::cudart CUDA::cublas)
+    else()
+        add_executable(mnist_bptt tools/mnist_bptt.c tools/bptt_cuda_stub.c)
+    endif()
     target_link_libraries(mnist_bptt PRIVATE snn ZLIB::ZLIB m)
     target_include_directories(mnist_bptt PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
     target_compile_options(mnist_bptt PRIVATE -Wall -Wextra)
