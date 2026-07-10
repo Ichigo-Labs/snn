@@ -21,6 +21,8 @@ A compact, performance-oriented leaky-integrate-and-fire SNN library in C with a
   each step — on CUDA this replaces the dominant per-step host-to-device
   upload with a transfer proportional to input activity.
 - Memory-planning API for dry-run sizing before allocating massive networks.
+- Training by backpropagation through time with six peak-normalized surrogate
+  gradients (`<snn/snn_bptt.h>`), validated against MNIST — see below.
 - Optional OpenMP parallelization of the CPU path (`-DSNN_ENABLE_OPENMP=ON`):
   the per-neuron membrane update splits across threads directly, and synaptic
   propagation uses per-thread scatter buffers reduced in fixed thread order —
@@ -49,6 +51,86 @@ cmake --build build -j
 `-march=native` (wider SIMD for the vectorized membrane update, non-portable
 binaries; may relax the bit-exact CPU/GPU spike parity through FMA contraction).
 
+## Training: BPTT with surrogate gradients
+
+`<snn/snn_bptt.h>` trains layered LIF networks by backpropagation through time.
+The spike's Heaviside step has a zero derivative almost everywhere and an
+infinite one at threshold, so the backward pass substitutes a **surrogate
+derivative**; every other edge of the unrolled graph — including the reset term
+and the same-timestep cross-layer coupling — is differentiated exactly.
+
+Six surrogates are provided, all **peak-normalized** (`phi(0) == 1` for every
+`alpha`), so `alpha` is purely the width of the gradient window and carries no
+implicit gain:
+
+| surrogate | `phi(x; alpha)` |
+| --- | --- |
+| `fast_sigmoid` | `1 / (1 + alpha*abs(x))^2` |
+| `atan` | `1 / (1 + (alpha*x)^2)` |
+| `sigmoid` | `4*sig(alpha*x)*(1 - sig(alpha*x))` |
+| `triangle` | `max(0, 1 - alpha*abs(x))` |
+| `gaussian` | `exp(-(alpha*x)^2 / 2)` |
+| `rectangular` | `1` when `alpha*abs(x) < 1`, else `0` |
+
+`snn_surrogate_primitive` returns the antiderivative `S` of each `phi` — the
+smooth spike function whose exact derivative is the surrogate. It is what gives
+a surrogate gradient its meaning (the backward pass computes the exact gradient
+of the network in which `H` is replaced by `S`) and it is what the
+finite-difference gradient tests differentiate.
+
+The trainable neuron is deliberately **not** `snn_step_cpu`'s: it drops `v_rest`
+and the refractory counter and resets by subtraction, leaving a graph that is
+differentiable everywhere except at the spike. `snn_bptt_beta_from_lif` bridges
+the simulator's `dt_ms`/`membrane_tau_ms` to the trainable decay.
+
+A network is read-only during forward and backward, so training parallelizes
+over the minibatch: give each thread a workspace and a gradient accumulator,
+then reduce with `snn_bptt_grads_add`.
+
+```c
+snn_size_t layers[] = {784, 256, 10};
+/* defaults: atan, alpha 2, beta 0.95, threshold 1.0 -- the MNIST-best config */
+snn_bptt_config_t cfg = snn_bptt_default_config(layers, 3, /*timesteps=*/20);
+
+snn_bptt_network_t *net = NULL;
+snn_bptt_workspace_t *ws = NULL;
+snn_bptt_grads_t *grads = NULL;
+snn_bptt_optimizer_t *adam = NULL;
+snn_bptt_network_create(&cfg, &net);
+snn_bptt_workspace_create(net, &ws);
+snn_bptt_grads_create(net, &grads);
+snn_bptt_optimizer_create(net, 2e-3f, 0.9f, 0.999f, 1e-8f, &adam);
+
+snn_bptt_grads_zero(grads);
+for (int i = 0; i < batch_size; ++i) {
+    /* static_input=1: one 784-current frame injected at every timestep */
+    snn_bptt_forward_backward(net, ws, image[i], 1, label[i], grads, NULL, NULL);
+}
+snn_bptt_optimizer_step(adam, net, grads, batch_size);
+```
+
+### MNIST
+
+The dataset is committed under `data/mnist/` (the four original idx.gz files).
+
+```bash
+cmake -S . -B build-tools -DSNN_BUILD_TOOLS=ON -DSNN_BUILD_TESTS=OFF
+cmake --build build-tools -j
+./build-tools/mnist_bptt --mode single --hidden 1000 --timesteps 25 --epochs 3
+```
+
+A 784-1000-10 network unrolled over 25 steps reaches **~97% test accuracy after
+one epoch** and **97.95% ± 0.18 after eight** (8 seeds), at a 5.4% hidden firing
+rate, in 10-13 s/epoch on 12 CPU cores.
+
+`atan` is the surrogate to reach for. On MNIST all four smooth surrogates are
+statistically tied on accuracy, so the choice is made by the two things that do
+separate: `atan` tolerates the widest range of `alpha` (0.27% accuracy lost
+across a 50x sweep, against 0.74% for `triangle`) and it is the sparsest, firing
+20.7% fewer spikes than `fast_sigmoid` at equal accuracy. See
+[docs/mnist_bptt.md](docs/mnist_bptt.md) for the full comparison, the `alpha`
+sweep, and the reset-path and unrolled-depth ablations.
+
 ## Benchmarks
 
 ```bash
@@ -65,7 +147,8 @@ no synapses) and a propagation-bound one (200k-neuron random pool, fanout 64,
 
 The gcov gate enforces **100% line coverage** on all host-side library code.
 
-CPU-only configuration (measures `src/snn.c` and the CUDA stub `src/snn_cuda_stub.c`):
+CPU-only configuration (measures `src/snn.c`, `src/snn_bptt.c` and the CUDA stub
+`src/snn_cuda_stub.c`):
 
 ```bash
 cmake -S . -B build-coverage -DSNN_ENABLE_CUDA=OFF -DSNN_ENABLE_COVERAGE=ON -DSNN_BUILD_TESTS=ON

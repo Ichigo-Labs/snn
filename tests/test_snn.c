@@ -6,44 +6,10 @@
 #include <stdlib.h>
 #include <string.h>
 
-#define ASSERT_TRUE(EXPR)                                                                 \
-    do {                                                                                  \
-        if (!(EXPR)) {                                                                    \
-            fprintf(stderr, "ASSERT_TRUE failed at %s:%d: %s\n", __FILE__, __LINE__, #EXPR); \
-            exit(1);                                                                      \
-        }                                                                                 \
-    } while (0)
+#include "test_common.h"
 
-#define ASSERT_EQ_U64(A, B)                                                               \
-    do {                                                                                  \
-        unsigned long long va_ = (unsigned long long)(A);                                 \
-        unsigned long long vb_ = (unsigned long long)(B);                                 \
-        if (va_ != vb_) {                                                                 \
-            fprintf(stderr, "ASSERT_EQ_U64 failed at %s:%d: %s=%llu %s=%llu\n", __FILE__, __LINE__, #A, va_, #B, vb_); \
-            exit(1);                                                                      \
-        }                                                                                 \
-    } while (0)
-
-#define ASSERT_EQ_INT(A, B)                                                               \
-    do {                                                                                  \
-        int va_ = (int)(A);                                                               \
-        int vb_ = (int)(B);                                                               \
-        if (va_ != vb_) {                                                                 \
-            fprintf(stderr, "ASSERT_EQ_INT failed at %s:%d: %s=%d %s=%d\n", __FILE__, __LINE__, #A, va_, #B, vb_); \
-            exit(1);                                                                      \
-        }                                                                                 \
-    } while (0)
-
-#define ASSERT_NEAR(A, B, EPS)                                                            \
-    do {                                                                                  \
-        float va_ = (float)(A);                                                           \
-        float vb_ = (float)(B);                                                           \
-        float eps_ = (float)(EPS);                                                        \
-        if (fabsf(va_ - vb_) > eps_) {                                                    \
-            fprintf(stderr, "ASSERT_NEAR failed at %s:%d: %s=%f %s=%f\n", __FILE__, __LINE__, #A, va_, #B, vb_); \
-            exit(1);                                                                      \
-        }                                                                                 \
-    } while (0)
+/* tests/test_bptt.c */
+void run_bptt_tests(void);
 
 static void test_strings_and_defaults(void) {
     snn_lif_params_t p = snn_default_lif_params();
@@ -1395,6 +1361,7 @@ int main(void) {
     test_reset_replay();
     test_inject_current();
     test_cuda_api();
+    run_bptt_tests();
     printf("all tests passed\n");
     return 0;
 }

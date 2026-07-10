@@ -1,0 +1,186 @@
+mnist_bptt: 60000 train, 10000 test, 784-1000-10, T=25, beta=0.95, thr=1, gain=0.577, lr=0.001, batch=128, threads=12, detach_reset=0
+surrogate=fast_sigmoid alpha=5 seed=1
+  epoch  1  train_loss 0.1837  test_loss 0.0902  test_acc  97.21%  firing 0.063  10.2s
+  epoch  2  train_loss 0.0710  test_loss 0.0723  test_acc  97.71%  firing 0.066  10.7s
+  epoch  3  train_loss 0.0435  test_loss 0.0731  test_acc  97.73%  firing 0.066  10.2s
+  epoch  4  train_loss 0.0316  test_loss 0.0697  test_acc  98.05%  firing 0.068  10.2s
+  epoch  5  train_loss 0.0247  test_loss 0.0731  test_acc  97.92%  firing 0.064  11.4s
+  epoch  6  train_loss 0.0231  test_loss 0.0938  test_acc  97.28%  firing 0.064  11.2s
+  epoch  7  train_loss 0.0204  test_loss 0.0696  test_acc  98.22%  firing 0.066  10.6s
+  epoch  8  train_loss 0.0155  test_loss 0.0987  test_acc  97.66%  firing 0.069  10.2s
+  => best 98.22%  final 97.66%  firing 0.069  84.7s
+surrogate=fast_sigmoid alpha=5 seed=2
+  epoch  1  train_loss 0.1847  test_loss 0.0867  test_acc  97.23%  firing 0.063  10.4s
+  epoch  2  train_loss 0.0717  test_loss 0.0935  test_acc  97.17%  firing 0.061  10.0s
+  epoch  3  train_loss 0.0459  test_loss 0.0611  test_acc  97.98%  firing 0.063  10.4s
+  epoch  4  train_loss 0.0309  test_loss 0.0823  test_acc  97.48%  firing 0.064  10.2s
+  epoch  5  train_loss 0.0237  test_loss 0.0907  test_acc  97.57%  firing 0.066  10.2s
+  epoch  6  train_loss 0.0230  test_loss 0.0879  test_acc  97.80%  firing 0.064  10.8s
+  epoch  7  train_loss 0.0218  test_loss 0.0712  test_acc  98.14%  firing 0.064  11.0s
+  epoch  8  train_loss 0.0182  test_loss 0.0807  test_acc  98.18%  firing 0.064  10.8s
+  => best 98.18%  final 98.18%  firing 0.064  83.8s
+surrogate=fast_sigmoid alpha=5 seed=3
+  epoch  1  train_loss 0.1890  test_loss 0.0919  test_acc  97.03%  firing 0.060  11.5s
+  epoch  2  train_loss 0.0698  test_loss 0.0689  test_acc  97.92%  firing 0.058  11.5s
+  epoch  3  train_loss 0.0433  test_loss 0.0866  test_acc  97.43%  firing 0.062  10.8s
+  epoch  4  train_loss 0.0326  test_loss 0.0743  test_acc  97.81%  firing 0.064  10.1s
+  epoch  5  train_loss 0.0253  test_loss 0.0659  test_acc  98.06%  firing 0.061  10.1s
+  epoch  6  train_loss 0.0206  test_loss 0.0739  test_acc  98.05%  firing 0.063  10.3s
+  epoch  7  train_loss 0.0159  test_loss 0.0791  test_acc  97.99%  firing 0.065  10.1s
+  epoch  8  train_loss 0.0160  test_loss 0.0781  test_acc  98.14%  firing 0.065  10.1s
+  => best 98.14%  final 98.14%  firing 0.065  84.5s
+mnist_bptt: 60000 train, 10000 test, 784-1000-10, T=25, beta=0.95, thr=1, gain=0.577, lr=0.001, batch=128, threads=12, detach_reset=0
+surrogate=atan alpha=2 seed=1
+  epoch  1  train_loss 0.1947  test_loss 0.0964  test_acc  97.05%  firing 0.052  10.4s
+  epoch  2  train_loss 0.0756  test_loss 0.0780  test_acc  97.66%  firing 0.054  10.6s
+  epoch  3  train_loss 0.0477  test_loss 0.0715  test_acc  97.92%  firing 0.057  10.6s
+  epoch  4  train_loss 0.0351  test_loss 0.0639  test_acc  98.09%  firing 0.055  10.3s
+  epoch  5  train_loss 0.0236  test_loss 0.0757  test_acc  97.92%  firing 0.056  10.0s
+  epoch  6  train_loss 0.0201  test_loss 0.0836  test_acc  97.60%  firing 0.055  10.1s
+  epoch  7  train_loss 0.0171  test_loss 0.0896  test_acc  97.71%  firing 0.054  10.1s
+  epoch  8  train_loss 0.0169  test_loss 0.0814  test_acc  98.06%  firing 0.056  10.1s
+  => best 98.09%  final 98.06%  firing 0.056  82.3s
+surrogate=atan alpha=2 seed=2
+  epoch  1  train_loss 0.1982  test_loss 0.0910  test_acc  97.01%  firing 0.052  10.1s
+  epoch  2  train_loss 0.0764  test_loss 0.0909  test_acc  97.19%  firing 0.054  10.2s
+  epoch  3  train_loss 0.0490  test_loss 0.0653  test_acc  98.12%  firing 0.054  11.1s
+  epoch  4  train_loss 0.0316  test_loss 0.0789  test_acc  97.66%  firing 0.057  10.1s
+  epoch  5  train_loss 0.0252  test_loss 0.0797  test_acc  98.06%  firing 0.057  10.7s
+  epoch  6  train_loss 0.0212  test_loss 0.1099  test_acc  97.24%  firing 0.056  10.5s
+  epoch  7  train_loss 0.0177  test_loss 0.0766  test_acc  98.18%  firing 0.055  10.6s
+  epoch  8  train_loss 0.0153  test_loss 0.0888  test_acc  98.07%  firing 0.058  10.9s
+  => best 98.18%  final 98.07%  firing 0.058  84.2s
+surrogate=atan alpha=2 seed=3
+  epoch  1  train_loss 0.2010  test_loss 0.0966  test_acc  96.96%  firing 0.052  10.6s
+  epoch  2  train_loss 0.0745  test_loss 0.0774  test_acc  97.69%  firing 0.049  10.5s
+  epoch  3  train_loss 0.0449  test_loss 0.0774  test_acc  97.79%  firing 0.052  10.6s
+  epoch  4  train_loss 0.0336  test_loss 0.0858  test_acc  97.65%  firing 0.054  10.8s
+  epoch  5  train_loss 0.0251  test_loss 0.0711  test_acc  97.93%  firing 0.050  10.8s
+  epoch  6  train_loss 0.0184  test_loss 0.0813  test_acc  97.84%  firing 0.055  10.2s
+  epoch  7  train_loss 0.0174  test_loss 0.0806  test_acc  97.84%  firing 0.052  10.3s
+  epoch  8  train_loss 0.0147  test_loss 0.0808  test_acc  98.07%  firing 0.050  10.0s
+  => best 98.07%  final 98.07%  firing 0.050  83.7s
+mnist_bptt: 60000 train, 10000 test, 784-1000-10, T=25, beta=0.95, thr=1, gain=0.577, lr=0.001, batch=128, threads=12, detach_reset=0
+surrogate=sigmoid alpha=2 seed=1
+  epoch  1  train_loss 0.1955  test_loss 0.0975  test_acc  96.96%  firing 0.054  10.9s
+  epoch  2  train_loss 0.0763  test_loss 0.0788  test_acc  97.56%  firing 0.059  10.7s
+  epoch  3  train_loss 0.0478  test_loss 0.0781  test_acc  97.74%  firing 0.063  11.1s
+  epoch  4  train_loss 0.0345  test_loss 0.0700  test_acc  97.98%  firing 0.060  10.8s
+  epoch  5  train_loss 0.0252  test_loss 0.0745  test_acc  97.91%  firing 0.059  10.6s
+  epoch  6  train_loss 0.0180  test_loss 0.0930  test_acc  97.62%  firing 0.063  10.4s
+  epoch  7  train_loss 0.0197  test_loss 0.0857  test_acc  97.95%  firing 0.062  10.2s
+  epoch  8  train_loss 0.0203  test_loss 0.1077  test_acc  97.67%  firing 0.063  10.2s
+  => best 97.98%  final 97.67%  firing 0.063  85.0s
+surrogate=sigmoid alpha=2 seed=2
+  epoch  1  train_loss 0.1970  test_loss 0.0903  test_acc  97.04%  firing 0.055  10.4s
+  epoch  2  train_loss 0.0758  test_loss 0.0929  test_acc  97.10%  firing 0.059  10.3s
+  epoch  3  train_loss 0.0494  test_loss 0.0709  test_acc  97.84%  firing 0.058  10.2s
+  epoch  4  train_loss 0.0328  test_loss 0.0817  test_acc  97.74%  firing 0.062  10.3s
+  epoch  5  train_loss 0.0266  test_loss 0.0739  test_acc  98.18%  firing 0.058  10.3s
+  epoch  6  train_loss 0.0231  test_loss 0.0871  test_acc  97.91%  firing 0.062  10.2s
+  epoch  7  train_loss 0.0200  test_loss 0.0793  test_acc  98.11%  firing 0.057  10.3s
+  epoch  8  train_loss 0.0167  test_loss 0.0826  test_acc  98.09%  firing 0.061  10.3s
+  => best 98.18%  final 98.09%  firing 0.061  82.2s
+surrogate=sigmoid alpha=2 seed=3
+  epoch  1  train_loss 0.1997  test_loss 0.0958  test_acc  96.97%  firing 0.055  10.2s
+  epoch  2  train_loss 0.0734  test_loss 0.0774  test_acc  97.64%  firing 0.053  10.2s
+  epoch  3  train_loss 0.0450  test_loss 0.0844  test_acc  97.58%  firing 0.057  10.3s
+  epoch  4  train_loss 0.0352  test_loss 0.0812  test_acc  97.73%  firing 0.057  10.2s
+  epoch  5  train_loss 0.0233  test_loss 0.0844  test_acc  97.78%  firing 0.056  10.3s
+  epoch  6  train_loss 0.0213  test_loss 0.1059  test_acc  97.29%  firing 0.059  10.2s
+  epoch  7  train_loss 0.0196  test_loss 0.0929  test_acc  97.76%  firing 0.059  10.3s
+  epoch  8  train_loss 0.0203  test_loss 0.0938  test_acc  97.88%  firing 0.056  10.5s
+  => best 97.88%  final 97.88%  firing 0.056  82.2s
+mnist_bptt: 60000 train, 10000 test, 784-1000-10, T=25, beta=0.95, thr=1, gain=0.577, lr=0.001, batch=128, threads=12, detach_reset=0
+surrogate=triangle alpha=1 seed=1
+  epoch  1  train_loss 0.1849  test_loss 0.0909  test_acc  97.26%  firing 0.066  9.7s
+  epoch  2  train_loss 0.0737  test_loss 0.0709  test_acc  97.78%  firing 0.068  9.6s
+  epoch  3  train_loss 0.0473  test_loss 0.0705  test_acc  97.82%  firing 0.070  9.9s
+  epoch  4  train_loss 0.0348  test_loss 0.0778  test_acc  97.84%  firing 0.068  9.8s
+  epoch  5  train_loss 0.0260  test_loss 0.0716  test_acc  97.89%  firing 0.066  9.8s
+  epoch  6  train_loss 0.0229  test_loss 0.0779  test_acc  97.77%  firing 0.067  10.0s
+  epoch  7  train_loss 0.0207  test_loss 0.0825  test_acc  98.00%  firing 0.066  9.9s
+  epoch  8  train_loss 0.0185  test_loss 0.0909  test_acc  97.68%  firing 0.068  10.0s
+  => best 98.00%  final 97.68%  firing 0.068  78.6s
+surrogate=triangle alpha=1 seed=2
+  epoch  1  train_loss 0.1871  test_loss 0.0904  test_acc  97.21%  firing 0.067  10.1s
+  epoch  2  train_loss 0.0744  test_loss 0.0891  test_acc  97.40%  firing 0.067  9.6s
+  epoch  3  train_loss 0.0502  test_loss 0.0683  test_acc  97.89%  firing 0.063  9.8s
+  epoch  4  train_loss 0.0308  test_loss 0.0667  test_acc  97.88%  firing 0.067  9.8s
+  epoch  5  train_loss 0.0277  test_loss 0.0753  test_acc  98.09%  firing 0.070  9.8s
+  epoch  6  train_loss 0.0232  test_loss 0.0834  test_acc  97.77%  firing 0.073  9.9s
+  epoch  7  train_loss 0.0203  test_loss 0.0956  test_acc  97.71%  firing 0.069  9.9s
+  epoch  8  train_loss 0.0211  test_loss 0.0908  test_acc  97.85%  firing 0.067  10.2s
+  => best 98.09%  final 97.85%  firing 0.067  79.3s
+surrogate=triangle alpha=1 seed=3
+  epoch  1  train_loss 0.1899  test_loss 0.0944  test_acc  96.90%  firing 0.065  9.8s
+  epoch  2  train_loss 0.0722  test_loss 0.0746  test_acc  97.70%  firing 0.061  9.7s
+  epoch  3  train_loss 0.0453  test_loss 0.0834  test_acc  97.59%  firing 0.062  9.8s
+  epoch  4  train_loss 0.0335  test_loss 0.0838  test_acc  97.56%  firing 0.065  9.9s
+  epoch  5  train_loss 0.0266  test_loss 0.0659  test_acc  98.09%  firing 0.062  9.9s
+  epoch  6  train_loss 0.0216  test_loss 0.1189  test_acc  96.97%  firing 0.067  9.9s
+  epoch  7  train_loss 0.0178  test_loss 0.0830  test_acc  97.88%  firing 0.067  9.9s
+  epoch  8  train_loss 0.0201  test_loss 0.0927  test_acc  97.68%  firing 0.069  9.9s
+  => best 98.09%  final 97.68%  firing 0.069  78.8s
+mnist_bptt: 60000 train, 10000 test, 784-1000-10, T=25, beta=0.95, thr=1, gain=0.577, lr=0.001, batch=128, threads=12, detach_reset=0
+surrogate=gaussian alpha=1 seed=1
+  epoch  1  train_loss 0.2003  test_loss 0.0990  test_acc  96.87%  firing 0.052  10.0s
+  epoch  2  train_loss 0.0786  test_loss 0.0816  test_acc  97.58%  firing 0.059  10.5s
+  epoch  3  train_loss 0.0495  test_loss 0.0732  test_acc  97.86%  firing 0.061  10.5s
+  epoch  4  train_loss 0.0368  test_loss 0.0676  test_acc  98.05%  firing 0.061  10.4s
+  epoch  5  train_loss 0.0257  test_loss 0.0715  test_acc  97.95%  firing 0.057  10.3s
+  epoch  6  train_loss 0.0229  test_loss 0.0962  test_acc  97.46%  firing 0.058  10.5s
+  epoch  7  train_loss 0.0202  test_loss 0.0977  test_acc  97.76%  firing 0.060  11.0s
+  epoch  8  train_loss 0.0181  test_loss 0.1083  test_acc  97.68%  firing 0.062  12.2s
+  => best 98.05%  final 97.68%  firing 0.062  85.6s
+surrogate=gaussian alpha=1 seed=2
+  epoch  1  train_loss 0.2024  test_loss 0.0937  test_acc  97.03%  firing 0.054  11.0s
+  epoch  2  train_loss 0.0781  test_loss 0.1000  test_acc  96.92%  firing 0.058  10.9s
+  epoch  3  train_loss 0.0501  test_loss 0.0699  test_acc  97.91%  firing 0.059  10.4s
+  epoch  4  train_loss 0.0337  test_loss 0.0682  test_acc  98.03%  firing 0.059  10.7s
+  epoch  5  train_loss 0.0279  test_loss 0.0805  test_acc  97.89%  firing 0.060  10.9s
+  epoch  6  train_loss 0.0208  test_loss 0.0877  test_acc  97.83%  firing 0.061  11.7s
+  epoch  7  train_loss 0.0174  test_loss 0.0807  test_acc  97.98%  firing 0.061  11.3s
+  epoch  8  train_loss 0.0180  test_loss 0.0933  test_acc  97.88%  firing 0.061  12.4s
+  => best 98.03%  final 97.88%  firing 0.061  89.4s
+surrogate=gaussian alpha=1 seed=3
+  epoch  1  train_loss 0.2046  test_loss 0.0975  test_acc  96.86%  firing 0.053  12.7s
+  epoch  2  train_loss 0.0759  test_loss 0.0784  test_acc  97.67%  firing 0.052  13.0s
+  epoch  3  train_loss 0.0462  test_loss 0.0892  test_acc  97.28%  firing 0.057  12.7s
+  epoch  4  train_loss 0.0346  test_loss 0.0871  test_acc  97.41%  firing 0.056  12.9s
+  epoch  5  train_loss 0.0250  test_loss 0.0657  test_acc  98.22%  firing 0.056  12.8s
+  epoch  6  train_loss 0.0216  test_loss 0.0838  test_acc  97.76%  firing 0.057  12.8s
+  epoch  7  train_loss 0.0205  test_loss 0.0895  test_acc  97.65%  firing 0.053  11.8s
+  epoch  8  train_loss 0.0200  test_loss 0.0803  test_acc  98.11%  firing 0.054  12.2s
+  => best 98.22%  final 98.11%  firing 0.054  100.9s
+mnist_bptt: 60000 train, 10000 test, 784-1000-10, T=25, beta=0.95, thr=1, gain=0.577, lr=0.001, batch=128, threads=12, detach_reset=0
+surrogate=rectangular alpha=0.5 seed=1
+  epoch  1  train_loss 0.2058  test_loss 0.1008  test_acc  96.94%  firing 0.051  11.0s
+  epoch  2  train_loss 0.0815  test_loss 0.0832  test_acc  97.47%  firing 0.056  12.4s
+  epoch  3  train_loss 0.0524  test_loss 0.0747  test_acc  97.75%  firing 0.059  10.5s
+  epoch  4  train_loss 0.0372  test_loss 0.0720  test_acc  97.87%  firing 0.056  10.5s
+  epoch  5  train_loss 0.0281  test_loss 0.0642  test_acc  98.31%  firing 0.056  10.3s
+  epoch  6  train_loss 0.0209  test_loss 0.0865  test_acc  97.72%  firing 0.054  10.3s
+  epoch  7  train_loss 0.0183  test_loss 0.0875  test_acc  97.85%  firing 0.057  10.2s
+  epoch  8  train_loss 0.0181  test_loss 0.1027  test_acc  97.58%  firing 0.056  10.2s
+  => best 98.31%  final 97.58%  firing 0.056  85.3s
+surrogate=rectangular alpha=0.5 seed=2
+  epoch  1  train_loss 0.2084  test_loss 0.0964  test_acc  96.90%  firing 0.052  10.1s
+  epoch  2  train_loss 0.0811  test_loss 0.1034  test_acc  96.84%  firing 0.056  10.3s
+  epoch  3  train_loss 0.0529  test_loss 0.0703  test_acc  97.95%  firing 0.055  10.0s
+  epoch  4  train_loss 0.0354  test_loss 0.0716  test_acc  97.80%  firing 0.055  10.2s
+  epoch  5  train_loss 0.0287  test_loss 0.0829  test_acc  97.82%  firing 0.058  10.2s
+  epoch  6  train_loss 0.0222  test_loss 0.1010  test_acc  97.53%  firing 0.059  10.1s
+  epoch  7  train_loss 0.0164  test_loss 0.0932  test_acc  97.76%  firing 0.058  10.2s
+  epoch  8  train_loss 0.0184  test_loss 0.1030  test_acc  97.66%  firing 0.054  10.0s
+  => best 97.95%  final 97.66%  firing 0.054  81.1s
+surrogate=rectangular alpha=0.5 seed=3
+  epoch  1  train_loss 0.2106  test_loss 0.1047  test_acc  96.65%  firing 0.051  10.1s
+  epoch  2  train_loss 0.0795  test_loss 0.0811  test_acc  97.58%  firing 0.049  10.2s
+  epoch  3  train_loss 0.0478  test_loss 0.0852  test_acc  97.43%  firing 0.054  10.0s
+  epoch  4  train_loss 0.0352  test_loss 0.0890  test_acc  97.37%  firing 0.053  10.2s
+  epoch  5  train_loss 0.0272  test_loss 0.0776  test_acc  97.88%  firing 0.055  10.2s
+  epoch  6  train_loss 0.0209  test_loss 0.0888  test_acc  97.60%  firing 0.059  10.1s
+  epoch  7  train_loss 0.0189  test_loss 0.0864  test_acc  97.80%  firing 0.053  10.2s
+  epoch  8  train_loss 0.0184  test_loss 0.0858  test_acc  97.98%  firing 0.051  10.1s
+  => best 97.98%  final 97.98%  firing 0.051  81.1s

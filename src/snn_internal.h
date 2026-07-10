@@ -1,7 +1,16 @@
 #ifndef SNN_INTERNAL_H
 #define SNN_INTERNAL_H
 
+#include <stddef.h>
+
 #include "snn/snn.h"
+
+/*
+ * calloc for library translation units other than snn.c. Defined in snn.c so
+ * that every allocation in the library funnels through the one
+ * SNN_ENABLE_TEST_HOOKS failure-injection counter, whichever file made it.
+ */
+void *snn_internal_calloc(size_t count, size_t elem_size);
 
 struct snn_network {
     snn_size_t neuron_count;

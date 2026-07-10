@@ -3,6 +3,7 @@
 
 #include <stdint.h>
 #include "snn/snn.h"
+#include "snn/snn_bptt.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -22,6 +23,15 @@ void snn_test_cuda_disable_failure(void);
 /* Force snn_cuda_available()/cudaMemGetInfo to report failure (create errors). */
 void snn_test_cuda_force_unavailable(int enable);
 void snn_test_cuda_force_meminfo_fail(int enable);
+/*
+ * Make the BPTT forward emit S(U - threshold) -- snn_surrogate_primitive --
+ * instead of the Heaviside. The surrogate backward is then the *exact*
+ * gradient of the resulting smooth model, so a finite-difference check
+ * validates the whole unrolled backward (reset path, cross-layer coupling,
+ * surrogate) against a real scalar loss. Differentiating the hard-spike
+ * forward would be meaningless: it is piecewise constant in the weights.
+ */
+void snn_test_bptt_set_soft_spikes(snn_bptt_network_t *network, int enable);
 #endif
 
 #ifdef __cplusplus

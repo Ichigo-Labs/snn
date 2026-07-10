@@ -13,7 +13,7 @@ import sys
 
 # Library translation units whose line coverage is gated. Kernel device code in
 # snn_cuda.cu is not measurable by gcov; only its host-side control flow is.
-SOURCE_BASENAMES = ("snn.c", "snn_cuda.cu", "snn_cuda_stub.c")
+SOURCE_BASENAMES = ("snn.c", "snn_bptt.c", "snn_cuda.cu", "snn_cuda_stub.c")
 
 
 def main() -> int:
@@ -45,12 +45,14 @@ def main() -> int:
             )
             return 1
         expected.add(src)
-    # Completeness guard #2: the core translation unit is present in every
-    # build configuration; if its objects vanished (e.g. a renamed CMake
-    # target escaping the path filter above), the gate is measuring nothing.
-    if "snn.c" not in expected:
-        print("no instrumented object found for snn.c", file=sys.stderr)
-        return 1
+    # Completeness guard #2: these translation units are present in every build
+    # configuration; if their objects vanished (e.g. a renamed CMake target
+    # escaping the path filter above), the gate would silently measure less
+    # while still reporting 100%.
+    for basename in ("snn.c", "snn_bptt.c"):
+        if basename not in expected:
+            print(f"no instrumented object found for {basename}", file=sys.stderr)
+            return 1
     # gcov -n prints a "File '<path>'" line followed by "Lines executed:P% of N".
     file_pat = re.compile(r"File '([^']+)'")
     lines_pat = re.compile(r"Lines executed:([0-9.]+)% of (\d+)")

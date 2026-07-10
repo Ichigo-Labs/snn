@@ -47,18 +47,24 @@ jobs:
         run: ctest --test-dir build --output-on-failure
 
   production:
-    name: production config (hooks off) + benchmarks + examples
+    name: production config (hooks off) + benchmarks + examples + tools
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - name: Install zlib (the MNIST trainer reads idx.gz directly)
+        run: sudo apt-get update && sudo apt-get install -y zlib1g-dev
       - name: Configure
         run: >
           cmake -S . -B build -DSNN_ENABLE_CUDA=OFF -DSNN_BUILD_TESTS=OFF
-          -DSNN_BUILD_BENCHMARKS=ON -DSNN_BUILD_EXAMPLES=ON
+          -DSNN_BUILD_BENCHMARKS=ON -DSNN_BUILD_EXAMPLES=ON -DSNN_BUILD_TOOLS=ON
       - name: Build
         run: cmake --build build -j
       - name: Run example
         run: ./build/minimal
+      - name: Train one short epoch on the committed MNIST
+        run: >
+          ./build/mnist_bptt --mode single --hidden 64 --timesteps 5 --epochs 1
+          --train 2000 --test 1000 --threads 2
 
   coverage:
     name: coverage gate (100%)

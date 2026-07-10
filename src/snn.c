@@ -49,6 +49,10 @@ static void *snn_calloc_impl(size_t count, size_t elem_size) {
 #define snn_calloc_impl calloc
 #endif
 
+void *snn_internal_calloc(size_t count, size_t elem_size) {
+    return snn_calloc_impl(count, elem_size);
+}
+
 static int checked_add_u64(uint64_t a, uint64_t b, uint64_t *out) {
     if (out == NULL) {
         return 0;
