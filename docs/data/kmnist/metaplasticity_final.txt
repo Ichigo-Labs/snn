@@ -1,0 +1,22 @@
+policy parameters: 70,313,673  factor=three
+kmnist_metaplasticity: 60000 train, 10000 test, device=cuda:0 (NVIDIA GeForce RTX 4060 Ti), torch=2.11.0+cu128
+meta-training the plasticity policy (gradient imitation)...
+  meta step    500/5000  align cos +0.2669  (L 0.32/0.27/0.25/0.23)  teacher loss 0.4146  74s
+  meta step   1000/5000  align cos +0.2842  (L 0.33/0.29/0.27/0.24)  teacher loss 0.4187  148s
+  meta step   1500/5000  align cos +0.2904  (L 0.33/0.30/0.27/0.26)  teacher loss 0.4133  221s
+  meta step   2000/5000  align cos +0.2953  (L 0.34/0.31/0.29/0.25)  teacher loss 0.4185  295s
+  meta step   2500/5000  align cos +0.2879  (L 0.32/0.30/0.27/0.26)  teacher loss 0.4110  369s
+  meta step   3000/5000  align cos +0.2971  (L 0.34/0.31/0.28/0.26)  teacher loss 0.4202  443s
+  meta step   3500/5000  align cos +0.2953  (L 0.34/0.30/0.28/0.26)  teacher loss 0.4060  517s
+  meta step   4000/5000  align cos +0.2983  (L 0.34/0.30/0.29/0.27)  teacher loss 0.4062  591s
+  meta step   4500/5000  align cos +0.2938  (L 0.33/0.30/0.28/0.26)  teacher loss 0.4155  665s
+  meta step   5000/5000  align cos +0.2951  (L 0.34/0.30/0.28/0.26)  teacher loss 0.4128  740s
+meta-training done in 740s
+
+benchmark (KMNIST test accuracy, 2 seeds, 3 deploy epochs):
+  raw pixels           concat 59.84%
+  learned/three s1     L1 39.37%  L2 31.46%  L3 32.28%  L4 26.45%  concat 42.50%
+  teacher s1           L1 78.76%  L2 82.01%  L3 82.48%  L4 81.65%  concat 83.64%
+  learned/three s2     L1 31.44%  L2 26.29%  L3 23.90%  L4 20.44%  concat 32.94%
+  teacher s2           L1 78.50%  L2 81.24%  L3 82.11%  L4 81.91%  concat 83.38%
+wrote 2 rows to docs/data/kmnist/metaplasticity_final.csv

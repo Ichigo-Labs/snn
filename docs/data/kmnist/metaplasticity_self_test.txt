@@ -1,0 +1,6 @@
+kmnist_metaplasticity self-test: device=cuda:0 (NVIDIA GeForce RTX 4060 Ti)
+  policy parameters: 70,313,673
+  differentiable forward vs finite differences: 12/12 agree
+  surrogate gradient finite across all layers: pass
+  policy forward + alignment: pass (init cos +0.016)
+  all self-test checks passed

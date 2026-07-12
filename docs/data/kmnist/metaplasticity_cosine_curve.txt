@@ -1,0 +1,12 @@
+policy parameters: 70,313,673  factor=three
+kmnist_metaplasticity: 60000 train, 10000 test, device=cuda:0 (NVIDIA GeForce RTX 4060 Ti), torch=2.11.0+cu128
+
+synthetic gradient-cosine curve (3 deploy epochs, seed 1):
+  raw pixels control: concat 59.84%
+  cos=1.00             L1 78.76%  L2 82.01%  L3 82.48%  L4 81.65%  concat 83.64%
+  cos=0.60             L1 79.33%  L2 82.07%  L3 82.70%  L4 82.71%  concat 83.60%
+  cos=0.40             L1 79.31%  L2 81.38%  L3 81.16%  L4 80.83%  concat 82.61%
+  cos=0.30             L1 76.93%  L2 78.79%  L3 79.17%  L4 78.59%  concat 80.74%
+  cos=0.20             L1 75.40%  L2 75.87%  L3 74.99%  L4 74.27%  concat 78.24%
+  cos=0.10             L1 74.25%  L2 74.37%  L3 73.35%  L4 72.11%  concat 76.41%
+  cos=0.00             L1 60.91%  L2 56.86%  L3 50.08%  L4 44.11%  concat 66.32%
