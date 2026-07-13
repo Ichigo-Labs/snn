@@ -145,6 +145,66 @@ Kuzushiji-MNIST is committed too (`data/kmnist/`, 20.3 MB) and is a drop-in:
 
 ## Benchmarks
 
+### Learned SNN meta-optimizer
+
+`tools/snn_meta_optimizer.py` implements a 50.87M-parameter AlphaZero-style
+policy/value network that learns bounded residuals around projected Adam while
+progressively growing a synthetic-task SNN.  It compares the learned policy with
+pair-STDP and surrogate-BPTT on one shared GPU recurrence and includes
+transactional fallback/rollback safeguards.
+
+Experiments are mechanically locked behind a source- and GPU-bound verification
+manifest:
+
+```bash
+python3 tools/snn_meta_optimizer.py verify --device cuda:0
+python3 tools/snn_meta_optimizer.py benchmark --device cuda:0
+```
+
+For a durable, resumable production run, use the separate production protocol.
+It meta-trains one policy across an architecture distribution, selects it on
+development tasks, freezes it, and then evaluates independent width and depth
+ladders:
+
+```bash
+RUN_DIR=build/snn-production/run-001
+python3 tools/snn_meta_optimizer.py verify --device cuda:0
+python3 tools/snn_production.py verify --device cuda:0
+python3 tools/snn_production.py run --device cuda:0 --run-dir "$RUN_DIR"
+```
+
+Inspect a live or stopped run and resume it with:
+
+```bash
+python3 tools/snn_production.py status --run-dir "$RUN_DIR"
+tail -f "$RUN_DIR/events.jsonl"
+python3 tools/snn_production.py run --device cuda:0 --run-dir "$RUN_DIR" --resume
+```
+
+The run directory contains atomic status/configuration files, an append-only
+JSONL event log, checksummed rotating checkpoints under `checkpoints/`, selected
+and frozen policy milestones under `best/` and `frozen/`, and `results.json`
+after successful completion. Status and results include alarm summaries and the
+exact target/actual meta-step termination record. If rollback health crosses a
+configured bound, the runner durably freezes the best development-selected
+policy and continues to evaluation while marking the controlled early stop.
+`SIGUSR1` requests a checkpoint at the next safe
+boundary without stopping.  The first `SIGINT` or `SIGTERM` requests a durable
+checkpoint and graceful stop; a second termination signal exits immediately
+and can lose progress since the last checkpoint.
+
+The first completed default run is staged production evidence, not a final
+statistical claim.  Inspect its alarms and loss curves before extending it, and
+repeat the complete protocol in new run directories with independent policy,
+meta-task, development-task, and evaluation-task seeds before drawing broad
+conclusions.
+
+The full workflow, architecture, safety rules, benchmark definitions,
+production operations, and important Adam-initialization caveat are documented in
+[docs/snn_meta_optimizer.md](docs/snn_meta_optimizer.md).
+
+### Simulator throughput
+
 ```bash
 cmake -S . -B build-bench -DSNN_BUILD_BENCHMARKS=ON -DSNN_BUILD_TESTS=OFF
 cmake --build build-bench -j

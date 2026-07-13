@@ -3,3 +3,5 @@ build-*/
 *.gcda
 *.gcno
 *.gcov
+__pycache__/
+*.py[cod]

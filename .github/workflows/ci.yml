@@ -51,6 +51,18 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - name: Check Python research and production tools parse
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          paths = (
+              Path("tools/snn_meta_optimizer.py"),
+              Path("tools/snn_production.py"),
+              Path("tools/snn_production_support.py"),
+          )
+          for path in paths:
+              compile(path.read_bytes(), str(path), "exec")
+          PY
       - name: Install zlib (the MNIST trainer reads idx.gz directly)
         run: sudo apt-get update && sudo apt-get install -y zlib1g-dev
       - name: Configure

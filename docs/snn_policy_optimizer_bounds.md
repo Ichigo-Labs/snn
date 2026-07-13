@@ -1,5 +1,11 @@
 # Can a policy network learn to optimize a spiking net? Where are the bounds?
 
+> **Prior-study note.** This document records the earlier small-policy study and
+> its retractions.  The correctness-gated 50M-parameter residual-policy
+> implementation is now documented in
+> [`snn_meta_optimizer.md`](snn_meta_optimizer.md).  In both studies, exact Adam
+> equivalence at zero meta-training is a plumbing control, not learned value.
+
 > **No. In this study the learned component never added value in any
 > configuration.** The only thing that optimizes a spiking net well is
 > hand-written Adam. That is the honest headline, and it is worth stating before
